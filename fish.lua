@@ -1,4 +1,4 @@
--- HarpoonMobile v0.10 | mobile tabs and structured diagnostics
+-- HarpoonMobile v0.11 | mobile tabs and structured diagnostics
 -- Data schema references: MaximumADHD/Roblox-Client-Tracker, rojo-rbx/rbx-dom,
 -- Roblox/luau-tag-utils (public API conventions). No third-party code loaded.
 -- Architecture references: Iris (UI state), RbxUtil/Trove (lifecycle),
@@ -26,6 +26,13 @@ local speciesFilter = ""
 local currentState = "unknown"
 local lastConfirmedUnderwater=-math.huge
 local lastReelSeen=-math.huge
+local reelAttempts=0
+local reelLastDecision="nenhuma"
+local reelNeedle=nil
+local reelLatched=false
+local reelLastTap=-math.huge
+local mouseBusy=false
+local lastAimDecision="nenhuma"
 local lastDiveRequest=-math.huge
 local reelEvidence={}
 local lastReelSample=-math.huge
@@ -42,7 +49,7 @@ local selectionRevision=0
 local previousRevision=-1
 local lockedTarget = nil
 local aimError = math.huge
-local aimBinding = "HarpoonMobileAimV010"
+local aimBinding = "HarpoonMobileAimV011"
 local controlCache = {}
 local lastMove,lastFeed = 0,0
 local lastScan = 0
@@ -106,7 +113,7 @@ local function btn(parent,value,size,pos)
     round(b,6)
     return b
 end
-label(header,"  HARPOON MOBILE  /  0.10",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
+label(header,"  HARPOON MOBILE  /  0.11",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
 local minimize = btn(header,"-",UDim2.fromOffset(29,29),UDim2.new(1,-64,0,5))
 local close = btn(header,"X",UDim2.fromOffset(29,29),UDim2.new(1,-32,0,5))
 local body = new("ScrollingFrame",panel,{Position=UDim2.fromOffset(0,73),Size=UDim2.new(1,0,1,-73),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,CanvasSize=UDim2.fromOffset(0,730)})
@@ -123,7 +130,7 @@ local function toggle(key,title,y)
     end)
 end
 toggle("fish","Auto Fish / disparo",42)
-toggle("reel","Reel / diagnostico",76)
+toggle("reel","Auto Reel / experimental",76)
 toggle("dive","Auto Mergulhar",110)
 toggle("surface","Auto Retornar",144)
 toggle("esp","Fish ESP",178)
@@ -441,10 +448,19 @@ local function tap(point)
     if point.X<8 or point.X>cam.ViewportSize.X-8 or point.Y<60 or point.Y>cam.ViewportSize.Y-8 then return false,"Coordenada fora da area permitida" end
     local fp=floating.AbsolutePosition+inset
     if point.X>=fp.X and point.X<=fp.X+floating.AbsoluteSize.X and point.Y>=fp.Y and point.Y<=fp.Y+floating.AbsoluteSize.Y then return false,"Botao HM sobre a entrada" end
+    if mouseBusy then return false,"Entrada ocupada" end
+    mouseBusy=true
+    local x,y=math.floor(point.X),math.floor(point.Y)
+    local pressed=false
     local ok,err=pcall(function()
-        vim:SendMouseButtonEvent(math.floor(point.X),math.floor(point.Y),0,true,game,0)
-        vim:SendMouseButtonEvent(math.floor(point.X),math.floor(point.Y),0,false,game,0)
+        vim:SendMouseButtonEvent(x,y,0,true,game,0)
+        pressed=true
+        task.wait(0.045)
+        vim:SendMouseButtonEvent(x,y,0,false,game,0)
+        pressed=false
     end)
+    if pressed then pcall(function() vim:SendMouseButtonEvent(x,y,0,false,game,0) end) end
+    mouseBusy=false
     lastInput=ok and "Toque enviado (captura nao confirmada)" or tostring(err):sub(1,220)
     log(string.format("input (%d,%d): %s",math.floor(point.X),math.floor(point.Y),lastInput))
     return ok,ok and "Toque enviado" or "Entrada bloqueada: veja diagnostico"
@@ -506,7 +522,7 @@ end
 connect(stop.Event,function() cleanup(false) end)
 connect(gui.Destroying,function() cleanup(true) end)
 connect(close.Activated,function() setPanel(false) end)
-RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Camera.Value+1,function(dt)
+RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Last.Value-1,function(dt)
     local ok,err=xpcall(function()
     aimError=math.huge
     if not alive or not options.aim or currentState~="underwater" or panel.Visible or diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then return end
@@ -519,8 +535,9 @@ RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Camera.Value+1,functi
     if direction.Magnitude<0.5 then return end
     local before=math.deg(math.acos(math.clamp(cam.CFrame.LookVector:Dot(direction.Unit),-1,1)))
     local goal=CFrame.lookAt(cam.CFrame.Position,cf.Position)
-    cam.CFrame=cam.CFrame:Lerp(goal,1-math.exp(-16*math.min(dt,0.1)))
+    cam.CFrame=goal
     aimError=math.deg(math.acos(math.clamp(cam.CFrame.LookVector:Dot(direction.Unit),-1,1)))
+    lastAimDecision=string.format("%s | antes=%.2f depois=%.2f",obj.Name,before,aimError)
     if os.clock()-lastAimSample>=0.5 then
         lastAimSample=os.clock()
         table.insert(aimSamples,string.format("%.2f | %s | antes=%.2f depois=%.2f",lastAimSample,obj.Name,before,aimError))
@@ -530,7 +547,7 @@ RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Camera.Value+1,functi
     if not ok and alive then aimError=math.huge; recordError(err) end
 end)
 local function buildDiagnostic()
-    local lines={"HarpoonMobile v0.10", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Estado: "..currentState, "Pausa anterior: "..pauseReason, "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts)}
+    local lines={"HarpoonMobile v0.11", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Estado: "..currentState, "Pausa anterior: "..pauseReason, "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts)}
     local activeOptions={}
     for k,v in pairs(options) do if v then table.insert(activeOptions,k) end end
     table.sort(activeOptions)
@@ -539,6 +556,8 @@ local function buildDiagnostic()
     table.insert(lines,string.format("Filtros: especie=%s raridade=%s min=%s max=%s modo=%s intervalo=%.2f",speciesFilter,rarityFilter,tostring(minWeight),tostring(maxWeight),modes[filter],interval))
     table.insert(lines,"Entrada virtual disponivel: "..tostring(vim~=nil))
     table.insert(lines,"Selecao: "..lastTargetReason)
+    table.insert(lines,"Ultima decisao de mira: "..lastAimDecision)
+    table.insert(lines,"Tentativas reel: "..tostring(reelAttempts).." | ultima: "..reelLastDecision)
     table.insert(lines,"=== Amostras de mira ===")
     for _,v in ipairs(aimSamples) do table.insert(lines,v) end
     table.insert(lines,"=== Amostras do minigame (somente interface visivel) ===")
@@ -666,8 +685,9 @@ local function buildDiagnostic()
     for _,v in ipairs(eventLog) do table.insert(lines,v) end
     reportText=table.concat(lines,"\n")
     local data={
-        schemaVersion=2,version="0.10",placeId=game.PlaceId,universeId=game.GameId,
+        schemaVersion=2,version="0.11",placeId=game.PlaceId,universeId=game.GameId,
         state=currentState,pauseReason=pauseReason,attempts=attempts,lastInput=lastInput,
+        reelAttempts=reelAttempts,reelLastDecision=reelLastDecision,lastAimDecision=lastAimDecision,
         runtimeErrors=runtimeErrors,lastRuntimeError=lastRuntimeError,
         activeOptions=activeOptions,
         filters={species=speciesFilter,rarity=rarityFilter,minWeight=minWeight,maxWeight=maxWeight,mode=modes[filter],interval=interval},
@@ -695,6 +715,65 @@ connect(diagnostic.Activated,function()
         setPanel(false)
     end
 end)
+-- Angle helper: select the shorter arc between the two visible boundaries.
+local function shortArc(a,b)
+    local span=(b-a)%360
+    if span<=180 then return a%360,span end
+    return b%360,360-span
+end
+local function reelParts(label)
+    local p=label
+    for _=1,5 do
+        if not p or p==pg then break end
+        local needle=p:FindFirstChild("NeedleRotator",true)
+        local cap1=p:FindFirstChild("CapO1",true)
+        local cap2=p:FindFirstChild("CapO2",true)
+        if needle and cap1 and cap2 and needle:IsA("GuiObject") and cap1:IsA("GuiObject") and cap2:IsA("GuiObject") then
+            if visible(needle) and visible(cap1) and visible(cap2) then
+                return needle,cap1,cap2
+            end
+        end
+        p=p.Parent
+    end
+    return nil
+end
+-- Keep this callback independent from the 150 ms UI scan. It uses only
+-- the existing rendered elements and the standard input path.
+local reelConn
+reelConn=RunService.RenderStepped:Connect(function()
+    if not alive or not options.reel or currentState~="reel" or panel.Visible or diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then
+        reelNeedle=nil; reelLatched=false; return
+    end
+    local ok,err=pcall(function()
+        local label=controlCache.reelLabel
+        if not label or not label.Parent or not visible(label) then
+            reelLastDecision="aguardando interface do minigame"; return
+        end
+        local needle,cap1,cap2=reelParts(label)
+        if not needle then reelLastDecision="limites visuais nao encontrados"; return end
+        if needle~=reelNeedle then reelNeedle=needle; reelLatched=false end
+        local a,span=shortArc(cap1.AbsoluteRotation,cap2.AbsoluteRotation)
+        if span<2 or span>178 then reelLastDecision="arco ambiguo"; return end
+        local offset=(needle.AbsoluteRotation-a)%360
+        local inside=offset>=0 and offset<=span
+        reelLastDecision=string.format("angulo=%.1f arco=%.1f+%.1f dentro=%s",needle.AbsoluteRotation,a,span,tostring(inside))
+        if not inside then reelLatched=false; return end
+        local margin=math.min(4,span*0.15)
+        if reelLatched or mouseBusy or os.clock()-reelLastTap<0.16 or offset<margin or offset>span-margin then return end
+        reelLatched=true
+        reelLastTap=os.clock()
+        local point=center(label)
+        task.spawn(function()
+            if not alive or not options.reel or currentState~="reel" or not visible(label) then return end
+            local sent,msg=tap(point)
+            if sent then reelAttempts=reelAttempts+1 end
+            log("reel tentativa: "..tostring(sent).." | "..tostring(msg))
+        end)
+    end)
+    if not ok then recordError(err) end
+end)
+table.insert(connections,reelConn)
+
 task.spawn(function()
     local lastEspUpdate=-math.huge
     local lastTarget=-math.huge
@@ -758,7 +837,7 @@ task.spawn(function()
             status.Text="Recolhimento experimental"
             lockedTarget=nil
             if options.reel then
-                status.Text="Minigame: tempo do indicador ainda nao calibrado"
+                status.Text="Minigame: "..reelLastDecision
             end
         elseif currentState=="surface" then
             status.Text="Superficie confirmada"
@@ -767,7 +846,7 @@ task.spawn(function()
                 lastFeed=now; tap(center(c.feed)); log("feed: tentativa de botao visivel")
             elseif options.dive and c.dive and visible(c.dive) and now-lastDive>3 then
                 lastDive=now; lastDiveRequest=now
-                local ok,msg=tap(center(c.dive)); log("dive: "..tostring(ok).." | "..tostring(msg))
+                local ok,msg=tap(center(c.dive)); log("dive: "..c.dive.Name.." ["..c.dive.ClassName.."] | "..tostring(ok).." | "..tostring(msg))
             end
         elseif currentState=="underwater" then
             status.Text="Submerso"
@@ -813,4 +892,4 @@ task.spawn(function()
         task.wait(0.08)
     end
 end)
-print("HarpoonMobile v0.10 carregado | PlaceId: "..tostring(game.PlaceId))
+print("HarpoonMobile v0.11 carregado | PlaceId: "..tostring(game.PlaceId))
