@@ -1,4 +1,4 @@
--- HarpoonMobile v0.6 | persistent mobile menu and client-visible diagnostics
+-- HarpoonMobile v0.7 | persistent mobile menu and client-visible diagnostics
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
@@ -21,9 +21,15 @@ local speciesFilter = ""
 local currentState = "unknown"
 local lastConfirmedUnderwater=-math.huge
 local pauseReason="inicializando"
+local runtimeErrors=0
+local lastRuntimeError="nenhum"
+local lastErrorAt=-math.huge
+local stateHistory={}
+local selectionRevision=0
+local previousRevision=-1
 local lockedTarget = nil
 local aimError = math.huge
-local aimBinding = "HarpoonMobileAimV06"
+local aimBinding = "HarpoonMobileAimV07"
 local controlCache = {}
 local lastMove,lastFeed = 0,0
 local lastScan = 0
@@ -87,7 +93,7 @@ local function btn(parent,value,size,pos)
     round(b,6)
     return b
 end
-label(header,"  HARPOON MOBILE  /  0.6",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
+label(header,"  HARPOON MOBILE  /  0.7",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
 local minimize = btn(header,"-",UDim2.fromOffset(29,29),UDim2.new(1,-64,0,5))
 local close = btn(header,"X",UDim2.fromOffset(29,29),UDim2.new(1,-32,0,5))
 local body = new("ScrollingFrame",panel,{Position=UDim2.fromOffset(0,39),Size=UDim2.new(1,0,1,-39),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,CanvasSize=UDim2.fromOffset(0,730)})
@@ -109,7 +115,7 @@ toggle("dive","Auto Mergulhar",110)
 toggle("surface","Auto Retornar",144)
 toggle("esp","Fish ESP",178)
 local f = btn(body,"Alvo: "..modes[filter],UDim2.new(1,-20,0,30),UDim2.fromOffset(10,212))
-connect(f.Activated,function() filter=filter%#modes+1; f.Text="Alvo: "..modes[filter] end)
+connect(f.Activated,function() filter=filter%#modes+1; f.Text="Alvo: "..modes[filter]; selectionRevision=selectionRevision+1 end)
 local minus = btn(body,"-",UDim2.fromOffset(38,29),UDim2.fromOffset(10,247))
 local delayText = label(body,"Intervalo: 0.35s",UDim2.new(1,-105,0,29),UDim2.fromOffset(57,247),12)
 local plus = btn(body,"+",UDim2.fromOffset(38,29),UDim2.new(1,-48,0,247))
@@ -161,7 +167,7 @@ end)
 connect(minimize.Activated,function() setPanel(false) end)
 local rarityInput=new("TextBox",body,{Size=UDim2.new(1,-20,0,30),Position=UDim2.fromOffset(10,350),Text="",PlaceholderText="Raridade exata (vazio = todas)",ClearTextOnFocus=false,BackgroundColor3=Color3.fromRGB(51,65,85),TextColor3=Color3.new(1,1,1),PlaceholderColor3=Color3.fromRGB(190,205,220),Font=Enum.Font.Gotham,TextSize=12})
 round(rarityInput,6)
-connect(rarityInput.FocusLost,function() rarityFilter=rarityInput.Text:match("^%s*(.-)%s*$"); if rarityFilter=="" then rarityFilter="Todos" end end)
+connect(rarityInput.FocusLost,function() rarityFilter=rarityInput.Text:match("^%s*(.-)%s*$"); if rarityFilter=="" then rarityFilter="Todos" end; selectionRevision=selectionRevision+1 end)
 local function weightBox(x,placeholder)
     local b=new("TextBox",body,{Size=UDim2.new(0.5,-15,0,30),Position=UDim2.fromOffset(x,386),Text="",PlaceholderText=placeholder,ClearTextOnFocus=false,BackgroundColor3=Color3.fromRGB(51,65,85),TextColor3=Color3.new(1,1,1),PlaceholderColor3=Color3.fromRGB(190,205,220),Font=Enum.Font.Gotham,TextSize=12})
     round(b,6)
@@ -171,12 +177,13 @@ local low,high=weightBox(10,"Peso minimo"),weightBox(143,"Peso maximo")
 local function readWeights()
     minWeight=weightNumber(low.Text)
     maxWeight=weightNumber(high.Text)
+    selectionRevision=selectionRevision+1
 end
 connect(low.FocusLost,readWeights)
 connect(high.FocusLost,readWeights)
 local speciesInput=new("TextBox",body,{Size=UDim2.new(1,-20,0,30),Position=UDim2.fromOffset(10,423),Text="",PlaceholderText="Especie (ex.: MidnightShark)",ClearTextOnFocus=false,BackgroundColor3=Color3.fromRGB(51,65,85),TextColor3=Color3.new(1,1,1),PlaceholderColor3=Color3.fromRGB(190,205,220),Font=Enum.Font.Gotham,TextSize=12})
 round(speciesInput,6)
-connect(speciesInput.FocusLost,function() speciesFilter=string.lower(speciesInput.Text:match("^%s*(.-)%s*$")) end)
+connect(speciesInput.FocusLost,function() speciesFilter=string.lower(speciesInput.Text:match("^%s*(.-)%s*$")); selectionRevision=selectionRevision+1 end)
 toggle("aim","Acompanhar mira",459)
 toggle("down","Descer (limites normais)",493)
 toggle("up","Subir (limites normais)",527)
@@ -252,6 +259,7 @@ local function selected(obj)
         local rarity=readField(obj,rarityKeys)
         if rarity==nil or string.lower(tostring(rarity))~=string.lower(rarityFilter) then return false end
     end
+    if minWeight and maxWeight and minWeight>maxWeight then return false end
     if minWeight or maxWeight then
         local w=weightNumber(readField(obj,weightKeys))
         if not w or (minWeight and w<minWeight) or (maxWeight and w>maxWeight) then return false end
@@ -282,10 +290,14 @@ local function normalized(s)
     for a,b in pairs({["Ç"]="C",["ç"]="c",["Ã"]="A",["ã"]="a",["Á"]="A",["á"]="a",["É"]="E",["é"]="e",["Ê"]="E",["ê"]="e",["Í"]="I",["í"]="i",["Ó"]="O",["ó"]="o",["Ú"]="U",["ú"]="u"}) do
         t=t:gsub(a,b)
     end
-    return string.upper(t)
+    return string.upper(t):gsub("%s+"," ")
+end
+local function renderedText(o)
+    local ok,value=pcall(function() return o.ContentText end)
+    return ok and type(value)=="string" and value~="" and value or o.Text
 end
 local function controls()
-    local found={texts={},buttons={},returnText=false,underwater=false,full=false,up=false,down=false,diveText=false}
+    local found={texts={},buttons={},evidence={},returnText=false,underwater=false,full=false,up=false,down=false,diveText=false}
     local cam=workspace.CurrentCamera
     local viewport=cam and cam.ViewportSize or Vector2.new(800,450)
     local function onScreen(o)
@@ -298,17 +310,20 @@ local function controls()
     end
     for _,o in ipairs(pg:GetDescendants()) do
         if (o:IsA("TextButton") or o:IsA("TextLabel")) and visible(o) and onScreen(o) and o.AbsoluteSize.X>3 and o.AbsoluteSize.Y>3 then
-            local t=normalized(o.Text)
+            local t=normalized(renderedText(o))
             local b=buttonFor(o)
-            if t=="DIVE" or t=="MERGULHAR" or t=="DIVE IN" then if b then found.dive=b else found.dive=o end; found.diveText=true
-            elseif t=="CLICK" or t=="CLIQUE" or t=="TAP" or t=="TOQUE" then found.reel=b or o
-            elseif t=="RETURN" or t=="VOLTAR" or t=="RETORNAR" then found.returnButton=b or o; found.returnText=true
-            elseif t=="SPACE" or t=="ESPACO" then found.spaceText=true
-            elseif string.find(t,"SPACE TO RETURN",1,true) or string.find(t,"ESPACO PARA VOLTAR",1,true) or string.find(t,"PRESS SPACE TO RETURN",1,true) then found.returnText=true
-            elseif t=="SUBIR" or t=="ASCEND" then found.up=true
-            elseif t=="DESCER" or t=="DESCEND" then found.down=true
-            elseif string.find(t,"BOLSA CHEIA",1,true) or string.find(t,"BAG FULL",1,true) then found.full=true
-            elseif t=="FEED" or t=="ALIMENTAR" then if b then found.feed=b end
+            local function evidence(key)
+                found.evidence[key]=t.." | "..o.Name
+            end
+            if t=="DIVE" or t=="MERGULHAR" or t=="DIVE IN" then if b then found.dive=b else found.dive=o end; found.diveText=true; evidence("dive")
+            elseif t=="CLICK" or t=="CLIQUE" or t=="TAP" or t=="TOQUE" then found.reel=b or o; evidence("reel")
+            elseif t=="RETURN" or t=="VOLTAR" or t=="RETORNAR" then found.returnButton=b or o; found.returnText=true; evidence("return")
+            elseif t=="SPACE" or t=="ESPACO" then found.spaceText=true; evidence("space")
+            elseif string.find(t,"SPACE TO RETURN",1,true) or string.find(t,"ESPACO PARA VOLTAR",1,true) or string.find(t,"PRESS SPACE TO RETURN",1,true) then found.returnText=true; evidence("returnPrompt")
+            elseif t=="SUBIR" or t=="ASCEND" then found.up=true; evidence("up")
+            elseif t=="DESCER" or t=="DESCEND" then found.down=true; evidence("down")
+            elseif string.find(t,"BOLSA CHEIA",1,true) or string.find(t,"BAG FULL",1,true) then found.full=true; evidence("full")
+            elseif t=="FEED" or t=="ALIMENTAR" then if b then found.feed=b; evidence("feed") end
             end
         end
     end
@@ -329,7 +344,16 @@ local lastInput="nenhum teste"
 local eventLog={}
 local function log(message)
     table.insert(eventLog,string.format("%.2f %s",os.clock(),message))
-    if #eventLog>40 then table.remove(eventLog,1) end
+    if #eventLog>150 then table.remove(eventLog,1) end
+end
+local function recordError(err)
+    runtimeErrors=runtimeErrors+1
+    local message=tostring(err):sub(1,400)
+    local now=os.clock()
+    if message~=lastRuntimeError or now-lastErrorAt>3 then
+        log("erro: "..message); lastErrorAt=now
+    end
+    lastRuntimeError=message
 end
 local function tap(point)
     if not vim then lastInput="Entrada virtual indisponivel"; log(lastInput); return false,lastInput end
@@ -353,14 +377,15 @@ local function tap(point)
     return ok,ok and "Toque enviado" or "Entrada bloqueada: veja diagnostico"
 end
 local function keyPress(key,hold)
-    if not vim or GuiService.MenuIsOpen or diagFrame.Visible or UIS:GetFocusedTextBox() then return false end
+    if not vim or GuiService.MenuIsOpen or diagFrame.Visible or UIS:GetFocusedTextBox() then lastInput="Tecla bloqueada: entrada indisponivel ou menu aberto"; log(lastInput); return false end
     local ok,err=pcall(function()
         vim:SendKeyEvent(true,key,false,game)
         task.wait(hold or 0.08)
         vim:SendKeyEvent(false,key,false,game)
     end)
     if not ok then pcall(function() vim:SendKeyEvent(false,key,false,game) end) end
-    log("tecla "..key.Name..": "..(ok and "enviada" or tostring(err)))
+    lastInput="tecla "..key.Name..": "..(ok and "enviada" or tostring(err))
+    log(lastInput)
     return ok
 end
 local function target()
@@ -401,6 +426,7 @@ end
 connect(stop.Event,cleanup)
 connect(close.Activated,function() setPanel(false) end)
 RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Camera.Value+1,function(dt)
+    local ok,err=xpcall(function()
     aimError=math.huge
     if not alive or not options.aim or currentState~="underwater" or panel.Visible or diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then return end
     local cam=workspace.CurrentCamera
@@ -413,18 +439,25 @@ RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Camera.Value+1,functi
     local goal=CFrame.lookAt(cam.CFrame.Position,cf.Position)
     cam.CFrame=cam.CFrame:Lerp(goal,1-math.exp(-16*math.min(dt,0.1)))
     aimError=math.deg(math.acos(math.clamp(cam.CFrame.LookVector:Dot(direction.Unit),-1,1)))
+    end,function(e) return tostring(e) end)
+    if not ok then aimError=math.huge; recordError(err) end
 end)
 connect(diagnostic.Activated,function()
-    local lines={"HarpoonMobile v0.6", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Estado: "..currentState, "Pausa anterior: "..pauseReason, "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts)}
+    local lines={"HarpoonMobile v0.7", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Estado: "..currentState, "Pausa anterior: "..pauseReason, "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts)}
     local activeOptions={}
     for k,v in pairs(options) do if v then table.insert(activeOptions,k) end end
     table.sort(activeOptions)
     table.insert(lines,"Modulos ativos: "..table.concat(activeOptions,","))
+    table.insert(lines,string.format("Erros de runtime: %d | ultimo: %s",runtimeErrors,lastRuntimeError))
+    table.insert(lines,string.format("Filtros: especie=%s raridade=%s min=%s max=%s modo=%s intervalo=%.2f",speciesFilter,rarityFilter,tostring(minWeight),tostring(maxWeight),modes[filter],interval))
+    table.insert(lines,"Entrada virtual disponivel: "..tostring(vim~=nil))
+    table.insert(lines,"TouchEnabled: "..tostring(UIS.TouchEnabled).." | KeyboardEnabled: "..tostring(UIS.KeyboardEnabled))
     local c=controls()
     for _,k in ipairs({"underwater","cameraScriptable","full","returnText","returnButton","spaceText","up","down","diveText","dive","reel","feed"}) do
         local x=c[k]
         table.insert(lines,k..": "..(typeof(x)=="Instance" and (x.Name.." ["..x.ClassName.."]") or tostring(x)))
     end
+    for k,v in pairs(c.evidence or {}) do table.insert(lines,"evidencia "..k..": "..v) end
     local cam=workspace.CurrentCamera
     if cam then table.insert(lines,"Viewport: "..tostring(cam.ViewportSize).." | camera: "..tostring(cam.CameraType)) end
     local groups={}
@@ -455,19 +488,43 @@ connect(diagnostic.Activated,function()
         table.sort(rarities)
         table.insert(lines,string.format("%s | qtd=%d | peso min=%s max=%s | raridades=%s",name,g.count,tostring(g.weights[1] or "?"),tostring(g.weights[#g.weights] or "?"),#rarities>0 and table.concat(rarities,",") or "?"))
     end
+    table.insert(lines,"=== Metadados de pesca encontrados ===")
+    local metadata={}
+    for obj in pairs(models) do
+        if obj:IsDescendantOf(workspace) then
+            local attrs={}
+            for k,v in pairs(obj:GetAttributes()) do
+                local key=string.lower(k)
+                if contains(key,{"fish","weight","rarity","tier","species","mutation","size","level","depth","scale","type"}) and (type(v)=="number" or type(v)=="boolean" or type(v)=="string") then
+                    table.insert(attrs,k.."="..tostring(v):sub(1,60))
+                end
+            end
+            table.sort(attrs)
+            local summary=obj.Name.." | "..table.concat(attrs,"; ")
+            if #attrs>0 then metadata[summary]=true end
+        end
+    end
+    local metaKeys={}
+    for v in pairs(metadata) do table.insert(metaKeys,v) end
+    table.sort(metaKeys)
+    for i=1,math.min(#metaKeys,250) do table.insert(lines,metaKeys[i]) end
+    if #metaKeys>250 then table.insert(lines,"Metadados limitados a 250 registros.") end
     table.insert(lines,"=== Interface de pesca visivel ===")
     local seen={}
     local total=0
     for _,o in ipairs(pg:GetDescendants()) do
-        if total>=150 then break end
+        if total>=250 then break end
         if (o:IsA("TextLabel") or o:IsA("TextButton")) and visible(o) and o.AbsoluteSize.X>2 and o.AbsoluteSize.Y>2 then
-            local t=normalized(o.Text)
-            if contains(string.lower(t),{"fish","peixe","mergul","dive","reel","clique","toque","tap","rarity","raridade","weight","peso","kg","harpoon","arpao","captur","recolh","bolsa","bag","espaco","space","subir","descer","ascend","descend","feed","aliment","evol","eat","comer","depth","profund","mukbang","return","voltar"}) and not seen[t] then
-                seen[t]=true; total=total+1
-                table.insert(lines,string.format("%s | %s | %s | pos=%s size=%s",t:sub(1,120),o.Name,o.ClassName,tostring(o.AbsolutePosition),tostring(o.AbsoluteSize)))
+            local t=normalized(renderedText(o))
+            if contains(string.lower(t),{"fish","peixe","mergul","dive","reel","clique","toque","tap","rarity","raridade","weight","peso","kg","harpoon","arpao","captur","recolh","bolsa","bag","espaco","space","subir","descer","ascend","descend","feed","aliment","evol","eat","comer","depth","profund","mukbang","return","voltar"}) and not seen[t.."|"..o.Name] then
+                seen[t.."|"..o.Name]=true; total=total+1
+                local raw=tostring(o.Text):sub(1,120)
+                table.insert(lines,string.format("%s | raw=%s | %s | %s | pos=%s size=%s",t:sub(1,120),raw,o.Name,o.ClassName,tostring(o.AbsolutePosition),tostring(o.AbsoluteSize)))
             end
         end
     end
+    table.insert(lines,"=== Historico de estados ===")
+    for _,v in ipairs(stateHistory) do table.insert(lines,v) end
     table.insert(lines,"=== Historico recente de entrada ===")
     for _,v in ipairs(eventLog) do table.insert(lines,v) end
     diagText.Text=table.concat(lines,"\n")
@@ -479,6 +536,7 @@ task.spawn(function()
     local lastTarget=-math.huge
     local previousState=""
     while alive and gui.Parent do
+        local ok,err=xpcall(function()
         local now=os.clock()
         if now-lastEspUpdate>=0.5 then updateEsp(); lastEspUpdate=now end
         if now-lastScan>=0.15 then controlCache=controls(); lastScan=now end
@@ -490,8 +548,14 @@ task.spawn(function()
         pauseReason=panel.Visible and "dashboard aberto" or diagFrame.Visible and "diagnostico aberto" or GuiService.MenuIsOpen and "menu Roblox aberto" or UIS:GetFocusedTextBox() and "teclado aberto" or currentState=="unknown" and "estado nao reconhecido" or "nenhuma"
         if previousState~=currentState then
             log("estado: "..currentState); previousState=currentState
+            local tags={}
+            for k,v in pairs(c.evidence or {}) do table.insert(tags,k.."="..v) end
+            table.sort(tags)
+            table.insert(stateHistory,string.format("%.2f %s | %s",now,currentState,table.concat(tags,"; ")))
+            if #stateHistory>50 then table.remove(stateHistory,1) end
             lockedTarget=nil
         end
+        if selectionRevision~=previousRevision then lockedTarget=nil; previousRevision=selectionRevision end
         local n=0
         for _ in pairs(models) do n=n+1 end
         counter.Text=string.format("Alvos: %d | Disparos: %d",n,attempts)
@@ -554,7 +618,14 @@ task.spawn(function()
             lockedTarget=nil
             status.Text="Estado desconhecido: entrada pausada"
         end
+        end,function(e) return tostring(e) end)
+        if not ok then
+            recordError(err)
+            lockedTarget=nil
+            status.Text="Erro recuperavel: veja diagnostico"
+            task.wait(0.5)
+        end
         task.wait(0.08)
     end
 end)
-print("HarpoonMobile v0.6 carregado | PlaceId: "..tostring(game.PlaceId))
+print("HarpoonMobile v0.7 carregado | PlaceId: "..tostring(game.PlaceId))
