@@ -1,4 +1,4 @@
--- HarpoonMobile v0.11 | mobile tabs and structured diagnostics
+-- HarpoonMobile v0.12 | mobile tabs and structured diagnostics
 -- Data schema references: MaximumADHD/Roblox-Client-Tracker, rojo-rbx/rbx-dom,
 -- Roblox/luau-tag-utils (public API conventions). No third-party code loaded.
 -- Architecture references: Iris (UI state), RbxUtil/Trove (lifecycle),
@@ -33,6 +33,14 @@ local reelLatched=false
 local reelLastTap=-math.huge
 local mouseBusy=false
 local lastAimDecision="nenhuma"
+local aimFrames=0
+local keyBusy=false
+local shotBlocked="nenhuma tentativa"
+local diveAttempts=0
+local diveTransitions=0
+local mutationFilter=""
+local minIncome=nil
+local incomeKeys={"incomepersecond","moneypersecond","cashpersecond","earningspersecond","revenuepersecond"}
 local lastDiveRequest=-math.huge
 local reelEvidence={}
 local lastReelSample=-math.huge
@@ -49,7 +57,7 @@ local selectionRevision=0
 local previousRevision=-1
 local lockedTarget = nil
 local aimError = math.huge
-local aimBinding = "HarpoonMobileAimV011"
+local aimBinding = "HarpoonMobileAimV012"
 local controlCache = {}
 local lastMove,lastFeed = 0,0
 local lastScan = 0
@@ -75,8 +83,14 @@ local function weightNumber(v)
     if type(v)~="string" then return nil end
     return tonumber((v:gsub(",","."):match("^%s*([%d%.]+)%s*$") or ""))
 end
+local function readIncome(obj)
+    local value,key=readField(obj,incomeKeys)
+    local n=weightNumber(value)
+    if n and n==n and n>=0 and n<math.huge then return n,key end
+    return nil,nil
+end
 local filter = 1
-local modes = {"Todos", "Grandes", "Peixes", "Maior peso"}
+local modes = {"Todos", "Grandes", "Peixes", "Maior peso", "Maior tamanho", "Maior renda (campo)"}
 local keywords = {"fish", "shark", "kraken", "megalodon", "crocodon", "nightcrawler", "hexjaw", "shrimp", "hydra", "ray", "peixe", "tubarao"}
 local large = {"shark", "kraken", "megalodon", "crocodon", "nightcrawler", "hexjaw", "hydra"}
 local models, highlights, connections = {}, {}, {}
@@ -113,7 +127,7 @@ local function btn(parent,value,size,pos)
     round(b,6)
     return b
 end
-label(header,"  HARPOON MOBILE  /  0.11",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
+label(header,"  HARPOON MOBILE  /  0.12",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
 local minimize = btn(header,"-",UDim2.fromOffset(29,29),UDim2.new(1,-64,0,5))
 local close = btn(header,"X",UDim2.fromOffset(29,29),UDim2.new(1,-32,0,5))
 local body = new("ScrollingFrame",panel,{Position=UDim2.fromOffset(0,73),Size=UDim2.new(1,0,1,-73),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,CanvasSize=UDim2.fromOffset(0,730)})
@@ -146,7 +160,7 @@ end
 connect(minus.Activated,function() change(-0.1) end)
 connect(plus.Activated,function() change(0.1) end)
 local counter=label(body,"Alvos: 0 | Tentativas: 0",UDim2.new(1,-20,0,25),UDim2.fromOffset(10,281),12)
-local hint=label(body,"Feche o painel para executar. Mira e captura sao controles separados.",UDim2.new(1,-20,0,42),UDim2.fromOffset(10,306),11)
+local hint=label(body,"Painel aberto nao pausa. Toques sobre painel e campos de texto continuam protegidos.",UDim2.new(1,-20,0,42),UDim2.fromOffset(10,306),11)
 hint.TextWrapped=true
 local floating = btn(gui,"HM",UDim2.fromOffset(58,58),UDim2.new(1,-10,0.5,0))
 floating.AnchorPoint=Vector2.new(0,0)
@@ -237,19 +251,32 @@ for i,k in ipairs(order) do move(buttons[k].button,body,42+(i-1)*34) end
 move(minus,body,352); move(plus,body,352); move(delayText,body,352)
 move(counter,body,390); move(hint,body,419); move(pause,body,470)
 body.CanvasSize=UDim2.fromOffset(0,515)
-local filterInfo=label(filtersPage,"Filtros existentes: peso bruto; raridade somente se conhecida.",UDim2.new(1,-20,0,45),UDim2.fromOffset(10,5),12)
+local filterInfo=label(filtersPage,"Peso bruto. Renda por segundo so quando existe campo explicito (nao validado).",UDim2.new(1,-20,0,45),UDim2.fromOffset(10,5),12)
 filterInfo.TextWrapped=true
 move(f,filtersPage,56); move(speciesInput,filtersPage,94); move(rarityInput,filtersPage,132)
 move(low,filtersPage,170); move(high,filtersPage,170)
-local clearFilters=btn(filtersPage,"LIMPAR FILTROS",UDim2.new(1,-20,0,34),UDim2.fromOffset(10,210))
+local mutationInput=new("TextBox",filtersPage,{Size=UDim2.new(1,-20,0,30),Position=UDim2.fromOffset(10,208),Text="",PlaceholderText="Mutacao (ex.: Silver)",ClearTextOnFocus=false,BackgroundColor3=Color3.fromRGB(51,65,85),TextColor3=Color3.new(1,1,1),PlaceholderColor3=Color3.fromRGB(190,205,220),Font=Enum.Font.Gotham,TextSize=12})
+round(mutationInput,6)
+connect(mutationInput.FocusLost,function()
+    mutationFilter=string.lower(mutationInput.Text:match("^%s*(.-)%s*$"))
+    selectionRevision=selectionRevision+1
+end)
+local incomeInput=new("TextBox",filtersPage,{Size=UDim2.new(1,-20,0,30),Position=UDim2.fromOffset(10,246),Text="",PlaceholderText="Renda/s minima (se conhecida)",ClearTextOnFocus=false,BackgroundColor3=Color3.fromRGB(51,65,85),TextColor3=Color3.new(1,1,1),PlaceholderColor3=Color3.fromRGB(190,205,220),Font=Enum.Font.Gotham,TextSize=12})
+round(incomeInput,6)
+connect(incomeInput.FocusLost,function()
+    minIncome=weightNumber(incomeInput.Text)
+    selectionRevision=selectionRevision+1
+end)
+local clearFilters=btn(filtersPage,"LIMPAR FILTROS",UDim2.new(1,-20,0,34),UDim2.fromOffset(10,284))
 connect(clearFilters.Activated,function()
     filter=1; f.Text="Alvo: "..modes[filter]
     speciesFilter=""; speciesInput.Text=""
     rarityFilter="Todos"; rarityInput.Text=""
     minWeight=nil; maxWeight=nil; low.Text=""; high.Text=""
+    mutationFilter=""; mutationInput.Text=""; minIncome=nil; incomeInput.Text=""
     selectionRevision=selectionRevision+1
 end)
-filtersPage.CanvasSize=UDim2.fromOffset(0,255)
+filtersPage.CanvasSize=UDim2.fromOffset(0,330)
 local dataInfo=label(dataPage,"Relatorio da sessao: estados, erros, pesos e atributos observados.",UDim2.new(1,-20,0,54),UDim2.fromOffset(10,5),12)
 dataInfo.TextWrapped=true
 dataInfo.Text="TXT resumido ou JSON com dados por exemplar, cobertura e campos ausentes."
@@ -332,9 +359,14 @@ connect(workspace.DescendantRemoving,remove)
 for _,obj in ipairs(workspace:GetDescendants()) do add(obj) end
 local function selected(obj)
     local n=string.lower(obj.Name)
-    local categoryOK=filter==1 or filter==4 or (filter==2 and contains(n,large)) or (filter==3 and contains(n,{"fish","peixe"}))
+    local categoryOK=filter==1 or filter>=4 or (filter==2 and contains(n,large)) or (filter==3 and contains(n,{"fish","peixe"}))
     if not categoryOK then return false end
     if speciesFilter~="" and not string.find(n,speciesFilter,1,true) then return false end
+    if mutationFilter~="" and string.lower(tostring(obj:GetAttribute("Mutation") or ""))~=mutationFilter then return false end
+    if minIncome or filter==6 then
+        local income=readIncome(obj)
+        if income==nil or (minIncome and income<minIncome) then return false end
+    end
     if rarityFilter~="Todos" then
         local rarity=readField(obj,rarityKeys)
         if rarity==nil or string.lower(tostring(rarity))~=string.lower(rarityFilter) then return false end
@@ -436,19 +468,21 @@ local function recordError(err)
     lastRuntimeError=message
 end
 local function tap(point)
+    if not alive then return false,"Painel encerrado" end
     if not vim then lastInput="Entrada virtual indisponivel"; log(lastInput); return false,lastInput end
     if diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then lastInput="Entrada pausada: menu/diagnostico/teclado"; return false,lastInput end
-    local p=panel.AbsolutePosition
     local inset=GuiService:GetGuiInset()
-    p=p+inset
-    local s=panel.AbsoluteSize
-    if panel.Visible and point.X>=p.X and point.X<=p.X+s.X and point.Y>=p.Y and point.Y<=p.Y+s.Y then return false,"Feche o painel para liberar o alvo" end
+    local function covered(obj)
+        local p,sz=obj.AbsolutePosition,obj.AbsoluteSize
+        local function inRect(a) return point.X>=a.X and point.X<=a.X+sz.X and point.Y>=a.Y and point.Y<=a.Y+sz.Y end
+        return inRect(p) or inRect(p+inset)
+    end
+    if panel.Visible and covered(panel) then return false,"Alvo coberto pelo dashboard" end
     local cam=workspace.CurrentCamera
     if not cam then return false,"Camera indisponivel" end
     if point.X<8 or point.X>cam.ViewportSize.X-8 or point.Y<60 or point.Y>cam.ViewportSize.Y-8 then return false,"Coordenada fora da area permitida" end
-    local fp=floating.AbsolutePosition+inset
-    if point.X>=fp.X and point.X<=fp.X+floating.AbsoluteSize.X and point.Y>=fp.Y and point.Y<=fp.Y+floating.AbsoluteSize.Y then return false,"Botao HM sobre a entrada" end
-    if mouseBusy then return false,"Entrada ocupada" end
+    if covered(floating) then return false,"Botao HM sobre a entrada" end
+    if mouseBusy or keyBusy then return false,"Entrada ocupada" end
     mouseBusy=true
     local x,y=math.floor(point.X),math.floor(point.Y)
     local pressed=false
@@ -466,13 +500,16 @@ local function tap(point)
     return ok,ok and "Toque enviado" or "Entrada bloqueada: veja diagnostico"
 end
 local function keyPress(key,hold)
+    if keyBusy or mouseBusy or not alive then return false end
     if not vim or GuiService.MenuIsOpen or diagFrame.Visible or UIS:GetFocusedTextBox() then lastInput="Tecla bloqueada: entrada indisponivel ou menu aberto"; log(lastInput); return false end
+    keyBusy=true
     local ok,err=pcall(function()
         vim:SendKeyEvent(true,key,false,game)
         task.wait(hold or 0.08)
         vim:SendKeyEvent(false,key,false,game)
     end)
     if not ok then pcall(function() vim:SendKeyEvent(false,key,false,game) end) end
+    keyBusy=false
     lastInput="tecla "..key.Name..": "..(ok and "enviada" or tostring(err))
     log(lastInput)
     return ok
@@ -497,6 +534,12 @@ local function target()
                     local w=weightNumber(readField(obj,weightKeys))
                     if filter==4 then
                         n=w and -w or math.huge
+                    elseif filter==5 then
+                        local sz=obj:GetAttribute("Size")
+                        n=type(sz)=="number" and -sz or math.huge
+                    elseif filter==6 then
+                        local income=readIncome(obj)
+                        n=income and -income or math.huge
                     end
                     if n<math.huge and (not score or n<score) then
                         best={point=v,name=obj.Name,weight=w,depth=p.Z,object=obj}; score=n
@@ -522,15 +565,17 @@ end
 connect(stop.Event,function() cleanup(false) end)
 connect(gui.Destroying,function() cleanup(true) end)
 connect(close.Activated,function() setPanel(false) end)
-RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Last.Value-1,function(dt)
+connect(RunService.RenderStepped,function(dt)
     local ok,err=xpcall(function()
     aimError=math.huge
-    if not alive or not options.aim or currentState~="underwater" or panel.Visible or diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then return end
+    if not alive or not options.aim then return end
+    aimFrames=aimFrames+1
+    if currentState~="underwater" or diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then lastAimDecision="pausada: "..currentState; return end
     local cam=workspace.CurrentCamera
     local obj=lockedTarget and lockedTarget.object
-    if not cam or not obj or not obj:IsDescendantOf(workspace) or not selected(obj) then return end
+    if not cam or not obj or not obj:IsDescendantOf(workspace) or not selected(obj) then lastAimDecision="sem alvo valido"; return end
     local ok,cf=pcall(function() return obj:GetBoundingBox() end)
-    if not ok then return end
+    if not ok then lastAimDecision="bounding box indisponivel"; return end
     local direction=cf.Position-cam.CFrame.Position
     if direction.Magnitude<0.5 then return end
     local before=math.deg(math.acos(math.clamp(cam.CFrame.LookVector:Dot(direction.Unit),-1,1)))
@@ -547,7 +592,7 @@ RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Last.Value-1,function
     if not ok and alive then aimError=math.huge; recordError(err) end
 end)
 local function buildDiagnostic()
-    local lines={"HarpoonMobile v0.11", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Estado: "..currentState, "Pausa anterior: "..pauseReason, "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts)}
+    local lines={"HarpoonMobile v0.12", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Estado: "..currentState, "Pausa anterior: "..pauseReason, "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts)}
     local activeOptions={}
     for k,v in pairs(options) do if v then table.insert(activeOptions,k) end end
     table.sort(activeOptions)
@@ -556,7 +601,10 @@ local function buildDiagnostic()
     table.insert(lines,string.format("Filtros: especie=%s raridade=%s min=%s max=%s modo=%s intervalo=%.2f",speciesFilter,rarityFilter,tostring(minWeight),tostring(maxWeight),modes[filter],interval))
     table.insert(lines,"Entrada virtual disponivel: "..tostring(vim~=nil))
     table.insert(lines,"Selecao: "..lastTargetReason)
-    table.insert(lines,"Ultima decisao de mira: "..lastAimDecision)
+    table.insert(lines,"Ultima decisao de mira: "..lastAimDecision.." | frames: "..aimFrames)
+    table.insert(lines,"Disparo: "..shotBlocked)
+    table.insert(lines,"Mergulho: "..diveAttempts.." tentativas | "..diveTransitions.." transicoes observadas")
+    table.insert(lines,"Filtros adicionais: mutacao="..mutationFilter.." renda minima="..tostring(minIncome))
     table.insert(lines,"Tentativas reel: "..tostring(reelAttempts).." | ultima: "..reelLastDecision)
     table.insert(lines,"=== Amostras de mira ===")
     for _,v in ipairs(aimSamples) do table.insert(lines,v) end
@@ -573,7 +621,7 @@ local function buildDiagnostic()
     if cam then table.insert(lines,"Viewport: "..tostring(cam.ViewportSize).." | camera: "..tostring(cam.CameraType)) end
     local groups={}
     local records={}
-    local coverage={models=0,weight=0,size=0,mutation=0,rarity=0,archetype=0,invalidWeight=0}
+    local coverage={models=0,weight=0,size=0,mutation=0,rarity=0,archetype=0,invalidWeight=0,incomePerSecond=0}
     for obj in pairs(models) do
         if obj:IsDescendantOf(workspace) then
             local name=obj.Name
@@ -612,7 +660,9 @@ local function buildDiagnostic()
             if type(archetype)=="string" and archetype~="" then
                 coverage.archetype=coverage.archetype+1
             else archetype=nil end
-            table.insert(records,{species=name,weight=w,size=size,mutation=mutation,rarity=rare,archetype=archetype})
+            local income,incomeField=readIncome(obj)
+            if income~=nil then coverage.incomePerSecond=coverage.incomePerSecond+1 end
+            table.insert(records,{species=name,weight=w,size=size,mutation=mutation,rarity=rare,archetype=archetype,incomePerSecond=income,incomeField=incomeField})
             for k,v in pairs(obj:GetAttributes()) do
                 if table.find(rarityKeys,string.lower(k)) or table.find(weightKeys,string.lower(k)) then g.attributes[k]=typeof(v) end
             end
@@ -624,7 +674,7 @@ local function buildDiagnostic()
         return (a.mutation or "")<(b.mutation or "")
     end)
     table.insert(lines,"=== Cobertura dos dados ===")
-    for _,k in ipairs({"models","weight","size","mutation","rarity","archetype","invalidWeight"}) do
+    for _,k in ipairs({"models","weight","size","mutation","rarity","archetype","invalidWeight","incomePerSecond"}) do
         table.insert(lines,k..": "..tostring(coverage[k]).." / "..tostring(coverage.models))
     end
     local speciesRows={}
@@ -651,7 +701,7 @@ local function buildDiagnostic()
             local attrs={}
             for k,v in pairs(obj:GetAttributes()) do
                 local key=string.lower(k)
-                if contains(key,{"fish","weight","rarity","tier","species","mutation","size","level","depth","scale","type"}) and (type(v)=="number" or type(v)=="boolean" or type(v)=="string") then
+                if contains(key,{"fish","weight","rarity","tier","species","mutation","size","level","depth","scale","type","income","earnings","money","cash","revenue"}) and (type(v)=="number" or type(v)=="boolean" or type(v)=="string") then
                     table.insert(attrs,k.."="..tostring(v):sub(1,60))
                 end
             end
@@ -672,7 +722,7 @@ local function buildDiagnostic()
         if total>=250 then break end
         if (o:IsA("TextLabel") or o:IsA("TextButton")) and visible(o) and o.AbsoluteSize.X>2 and o.AbsoluteSize.Y>2 then
             local t=normalized(renderedText(o))
-            if contains(string.lower(t),{"fish","peixe","mergul","dive","reel","clique","toque","tap","rarity","raridade","weight","peso","kg","harpoon","arpao","captur","recolh","bolsa","bag","espaco","space","subir","descer","ascend","descend","feed","aliment","evol","eat","comer","depth","profund","mukbang","return","voltar"}) and not seen[t.."|"..o.Name] then
+            if contains(string.lower(t),{"fish","peixe","mergul","dive","reel","clique","toque","tap","rarity","raridade","weight","peso","kg","harpoon","arpao","captur","recolh","bolsa","bag","espaco","space","subir","descer","ascend","descend","feed","aliment","evol","eat","comer","depth","profund","mukbang","return","voltar","$/s","/sec","/min","/s","income","earn","renda","dinheiro","cash","money"}) and not seen[t.."|"..o.Name] then
                 seen[t.."|"..o.Name]=true; total=total+1
                 local raw=tostring(o.Text):sub(1,120)
                 table.insert(lines,string.format("%s | raw=%s | %s | %s | pos=%s size=%s",t:sub(1,120),raw,o.Name,o.ClassName,tostring(o.AbsolutePosition),tostring(o.AbsoluteSize)))
@@ -685,14 +735,14 @@ local function buildDiagnostic()
     for _,v in ipairs(eventLog) do table.insert(lines,v) end
     reportText=table.concat(lines,"\n")
     local data={
-        schemaVersion=2,version="0.11",placeId=game.PlaceId,universeId=game.GameId,
+        schemaVersion=2,version="0.12",placeId=game.PlaceId,universeId=game.GameId,
         state=currentState,pauseReason=pauseReason,attempts=attempts,lastInput=lastInput,
-        reelAttempts=reelAttempts,reelLastDecision=reelLastDecision,lastAimDecision=lastAimDecision,
+        reelAttempts=reelAttempts,reelLastDecision=reelLastDecision,lastAimDecision=lastAimDecision,aimFrames=aimFrames,shotBlocked=shotBlocked,diveAttempts=diveAttempts,diveTransitions=diveTransitions,
         runtimeErrors=runtimeErrors,lastRuntimeError=lastRuntimeError,
         activeOptions=activeOptions,
-        filters={species=speciesFilter,rarity=rarityFilter,minWeight=minWeight,maxWeight=maxWeight,mode=modes[filter],interval=interval},
+        filters={species=speciesFilter,rarity=rarityFilter,minWeight=minWeight,maxWeight=maxWeight,mode=modes[filter],interval=interval,mutation=mutationFilter,minIncome=minIncome},
         species=speciesRows,coverage=coverage,observations={},metadataSample={},stateHistory=stateHistory,events=eventLog,
-        observedControls=c.evidence or {},rawWeightUnit="unverified",observationCount=#records,observationLimit=1000,observationsTruncated=#records>1000,source="previously observed client metadata; not a server or memory dump"
+        observedControls=c.evidence or {},rawWeightUnit="unverified",incomeFieldsVerified=false,observationCount=#records,observationLimit=1000,observationsTruncated=#records>1000,source="previously observed client metadata; not a server or memory dump"
     }
     for i=1,math.min(#metaKeys,40) do table.insert(data.metadataSample,metaKeys[i]) end
     for i=1,math.min(#records,1000) do table.insert(data.observations,records[i]) end
@@ -741,7 +791,7 @@ end
 -- the existing rendered elements and the standard input path.
 local reelConn
 reelConn=RunService.RenderStepped:Connect(function()
-    if not alive or not options.reel or currentState~="reel" or panel.Visible or diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then
+    if not alive or not options.reel or currentState~="reel" or diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then
         reelNeedle=nil; reelLatched=false; return
     end
     local ok,err=pcall(function()
@@ -807,9 +857,9 @@ task.spawn(function()
             table.insert(reelEvidence,string.format("%.2f | %s",now,table.concat(rows,"; ")))
             if #reelEvidence>20 then table.remove(reelEvidence,1) end
         end
-        pauseReason=panel.Visible and "dashboard aberto" or diagFrame.Visible and "diagnostico aberto" or GuiService.MenuIsOpen and "menu Roblox aberto" or UIS:GetFocusedTextBox() and "teclado aberto" or currentState=="unknown" and "estado nao reconhecido" or "nenhuma"
+        pauseReason=diagFrame.Visible and "diagnostico aberto" or GuiService.MenuIsOpen and "menu Roblox aberto" or UIS:GetFocusedTextBox() and "teclado aberto" or currentState=="unknown" and "estado nao reconhecido" or "nenhuma"
         if previousState~=currentState then
-            if currentState=="underwater" and now-lastDiveRequest<8 then log("mergulho: transicao observada apos tentativa; origem nao confirmada") end
+            if currentState=="underwater" and now-lastDiveRequest<8 then diveTransitions=diveTransitions+1; lastDiveRequest=-math.huge; log("mergulho: transicao observada apos tentativa; origem nao confirmada") end
             log("estado: "..currentState); previousState=currentState
             local tags={}
             for k,v in pairs(c.evidence or {}) do table.insert(tags,k.."="..v) end
@@ -823,7 +873,7 @@ task.spawn(function()
         for _ in pairs(models) do n=n+1 end
         counter.Text=string.format("Alvos: %d | Disparos: %d",n,attempts)
         if not panel.Visible then floating.Text=currentState=="underwater" and "HM\nAGUA" or currentState=="full" and "HM\nCHEIO" or currentState=="surface" and "HM\nTERRA" or currentState=="reel" and "HM\nREEL" or "HM\n?" end
-        if panel.Visible or diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then
+        if diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then
             status.Text="Pausado: "..pauseReason
             lockedTarget=nil
         elseif currentState=="full" then
@@ -845,14 +895,15 @@ task.spawn(function()
             if options.feed and c.feed and visible(c.feed) and now-lastFeed>3 then
                 lastFeed=now; tap(center(c.feed)); log("feed: tentativa de botao visivel")
             elseif options.dive and c.dive and visible(c.dive) and now-lastDive>3 then
-                lastDive=now; lastDiveRequest=now
+                lastDive=now; lastDiveRequest=now; diveAttempts=diveAttempts+1
                 local ok,msg=tap(center(c.dive)); log("dive: "..c.dive.Name.." ["..c.dive.ClassName.."] | "..tostring(ok).." | "..tostring(msg))
             end
         elseif currentState=="underwater" then
             status.Text="Submerso"
-            if options.up~=options.down and now-lastMove>0.8 then
+            if options.up~=options.down and now-lastMove>0.85 and not keyBusy and not mouseBusy and not (lockedTarget and options.fish) then
                 lastMove=now
-                keyPress(options.up and Enum.KeyCode.E or Enum.KeyCode.Q,0.25)
+                local moveKey=options.up and Enum.KeyCode.E or Enum.KeyCode.Q
+                task.spawn(function() if alive and currentState=="underwater" then keyPress(moveKey,0.45) end end)
             elseif options.surface and not options.fish and now-lastSurface>=3 then
                 lastSurface=now; keyPress(Enum.KeyCode.Space)
             end
@@ -868,15 +919,19 @@ task.spawn(function()
                     if options.aim then
                         status.Text=string.format("Mira: %s | %.1f graus",lockedTarget.name,aimError)
                     end
-                    if options.fish and now-lastShot>=interval and on and point.Z>0 and (not options.aim or aimError<=3) then
-                        lastShot=now
-                        local p=options.aim and cam.ViewportSize/2 or Vector2.new(point.X,point.Y)
-                        local ok,msg=tap(p)
-                        if ok then attempts=attempts+1 end
-                        status.Text=ok and ("Disparo: "..lockedTarget.name) or msg
+                    if options.fish then
+                        shotBlocked=not on and "alvo fora da tela" or point.Z<=0 and "alvo atras da camera" or (options.aim and aimError>3) and "aguardando alinhamento" or (keyBusy or mouseBusy) and "entrada ocupada" or "pronto"
+                        if now-lastShot>=interval and on and point.Z>0 and (not options.aim or aimError<=3) and not keyBusy and not mouseBusy then
+                            lastShot=now
+                            local p=options.aim and cam.ViewportSize/2 or Vector2.new(point.X,point.Y)
+                            local ok,msg=tap(p)
+                            if ok then attempts=attempts+1 end
+                            shotBlocked=msg
+                            status.Text=ok and ("Disparo: "..lockedTarget.name) or msg
+                        end
                     end
                     if not on and now-lastTarget>1.5 then lockedTarget=nil end
-                else status.Text=lastTargetReason end
+                else status.Text=lastTargetReason; shotBlocked=lastTargetReason end
             else lockedTarget=nil end
         else
             lockedTarget=nil
@@ -892,4 +947,4 @@ task.spawn(function()
         task.wait(0.08)
     end
 end)
-print("HarpoonMobile v0.11 carregado | PlaceId: "..tostring(game.PlaceId))
+print("HarpoonMobile v0.12 carregado | PlaceId: "..tostring(game.PlaceId))
