@@ -1,6 +1,7 @@
--- HarpoonMobile v0.4 | persistent mobile menu and client-visible diagnostics
+-- HarpoonMobile v0.5 | persistent mobile menu and client-visible diagnostics
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
 local GuiService = game:GetService("GuiService")
 local player = Players.LocalPlayer
 if not player then
@@ -14,8 +15,16 @@ if prior then
     if stop then stop:Fire() else prior:Destroy() end
 end
 local alive = true
-local options = {fish=false, reel=false, dive=false, surface=false, esp=false}
+local options = {fish=false, reel=false, dive=false, surface=false, esp=false, aim=false, down=false, up=false, feed=false}
 local interval = 0.35
+local speciesFilter = ""
+local currentState = "unknown"
+local lockedTarget = nil
+local aimError = math.huge
+local aimBinding = "HarpoonMobileAimV05"
+local controlCache = {}
+local lastMove,lastFeed = 0,0
+local lastScan = 0
 local rarityFilter = "Todos"
 local minWeight, maxWeight = nil, nil
 local rarityKeys = {"rarity","tier","raridade","fishrarity"}
@@ -55,14 +64,15 @@ local function new(class, parent, props)
     return obj
 end
 local function round(obj, radius)
-    new("UICorner", obj, {CornerRadius=UDim.new(0,radius or 8)})
+    local corner=obj:FindFirstChildOfClass("UICorner") or new("UICorner",obj)
+    corner.CornerRadius=UDim.new(0,radius or 8)
 end
 local function connect(signal, fn)
     local c = signal:Connect(fn)
     table.insert(connections,c)
     return c
 end
-local gui = new("ScreenGui",pg,{Name="HarpoonMobileV2",ResetOnSpawn=false,DisplayOrder=10000,IgnoreGuiInset=false,ZIndexBehavior=Enum.ZIndexBehavior.Sibling})
+local gui = new("ScreenGui",pg,{Name="HarpoonMobileV2",ResetOnSpawn=false,DisplayOrder=10000,IgnoreGuiInset=false,AutoLocalize=false,ZIndexBehavior=Enum.ZIndexBehavior.Sibling})
 local stop = new("BindableEvent",gui,{Name="Stop"})
 local panel = new("Frame",gui,{Size=UDim2.fromOffset(282,310),Position=UDim2.new(0,12,0.5,-155),BackgroundColor3=Color3.fromRGB(17,24,39),BorderSizePixel=0,ClipsDescendants=true,Active=true})
 round(panel,12)
@@ -75,10 +85,10 @@ local function btn(parent,value,size,pos)
     round(b,6)
     return b
 end
-label(header,"  HARPOON MOBILE  /  0.4",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
+label(header,"  HARPOON MOBILE  /  0.5",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
 local minimize = btn(header,"-",UDim2.fromOffset(29,29),UDim2.new(1,-64,0,5))
 local close = btn(header,"X",UDim2.fromOffset(29,29),UDim2.new(1,-32,0,5))
-local body = new("ScrollingFrame",panel,{Position=UDim2.fromOffset(0,39),Size=UDim2.new(1,0,1,-39),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,CanvasSize=UDim2.fromOffset(0,490)})
+local body = new("ScrollingFrame",panel,{Position=UDim2.fromOffset(0,39),Size=UDim2.new(1,0,1,-39),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,CanvasSize=UDim2.fromOffset(0,730)})
 local status = label(body,"Inicializando...",UDim2.new(1,-18,0,32),UDim2.fromOffset(10,6),12)
 status.TextWrapped=true
 local buttons = {}
@@ -108,7 +118,7 @@ end
 connect(minus.Activated,function() change(-0.1) end)
 connect(plus.Activated,function() change(0.1) end)
 local counter=label(body,"Alvos: 0 | Tentativas: 0",UDim2.new(1,-20,0,25),UDim2.fromOffset(10,281),12)
-local hint=label(body,"Mergulhe antes de ativar Auto Fish. Reel depende do timing do jogo.",UDim2.new(1,-20,0,42),UDim2.fromOffset(10,306),11)
+local hint=label(body,"Feche o painel para executar. Mira e captura sao controles separados.",UDim2.new(1,-20,0,42),UDim2.fromOffset(10,306),11)
 hint.TextWrapped=true
 local floating = btn(gui,"HM",UDim2.fromOffset(58,58),UDim2.new(1,-10,0.5,0))
 floating.AnchorPoint=Vector2.new(0,0)
@@ -162,15 +172,46 @@ local function readWeights()
 end
 connect(low.FocusLost,readWeights)
 connect(high.FocusLost,readWeights)
-local diagnostic=btn(body,"GERAR DIAGNOSTICO",UDim2.new(1,-20,0,34),UDim2.fromOffset(10,424))
+local speciesInput=new("TextBox",body,{Size=UDim2.new(1,-20,0,30),Position=UDim2.fromOffset(10,423),Text="",PlaceholderText="Especie (ex.: MidnightShark)",ClearTextOnFocus=false,BackgroundColor3=Color3.fromRGB(51,65,85),TextColor3=Color3.new(1,1,1),PlaceholderColor3=Color3.fromRGB(190,205,220),Font=Enum.Font.Gotham,TextSize=12})
+round(speciesInput,6)
+connect(speciesInput.FocusLost,function() speciesFilter=string.lower(speciesInput.Text:match("^%s*(.-)%s*$")) end)
+toggle("aim","Acompanhar mira",459)
+toggle("down","Descer (limites normais)",493)
+toggle("up","Subir (limites normais)",527)
+toggle("feed","Auto Feed (menu aberto)",561)
+local diagnostic=btn(body,"GERAR DIAGNOSTICO",UDim2.new(1,-20,0,34),UDim2.fromOffset(10,599))
+local pause=btn(body,"PAUSAR TODOS",UDim2.new(1,-20,0,34),UDim2.fromOffset(10,640))
+connect(pause.Activated,function()
+    for k,v in pairs(buttons) do
+        options[k]=false
+        v.button.Text=v.title.."  [OFF]"
+        v.button.BackgroundColor3=Color3.fromRGB(51,65,85)
+    end
+end)
 local diagFrame=new("Frame",gui,{Size=UDim2.new(0.85,0,0.8,0),Position=UDim2.fromScale(0.5,0.5),AnchorPoint=Vector2.new(0.5,0.5),BackgroundColor3=Color3.fromRGB(15,23,42),Visible=false,ZIndex=20})
 round(diagFrame,10)
-local diagClose=btn(diagFrame,"Fechar",UDim2.fromOffset(80,32),UDim2.new(1,-90,0,6))
+local diagClose=btn(diagFrame,"Fechar",UDim2.fromOffset(70,32),UDim2.new(1,-78,0,6))
+local copyBtn=btn(diagFrame,"COPIAR",UDim2.fromOffset(80,32),UDim2.new(1,-166,0,6))
+copyBtn.ZIndex=22
 diagClose.ZIndex=22
-label(diagFrame,"  Diagnostico (dados visiveis)",UDim2.new(1,-95,0,38),UDim2.fromOffset(0,0),13).ZIndex=21
+label(diagFrame,"  Diagnostico (dados visiveis)",UDim2.new(1,-175,0,38),UDim2.fromOffset(0,0),13).ZIndex=21
 local diagScroll=new("ScrollingFrame",diagFrame,{Position=UDim2.fromOffset(8,45),Size=UDim2.new(1,-16,1,-53),CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,ScrollBarThickness=5,ZIndex=21})
 local diagText=new("TextBox",diagScroll,{Size=UDim2.new(1,-8,0,0),AutomaticSize=Enum.AutomaticSize.Y,MultiLine=true,TextWrapped=true,TextEditable=true,ClearTextOnFocus=false,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Text="",TextSize=12,Font=Enum.Font.Code,BackgroundColor3=Color3.fromRGB(30,41,59),TextColor3=Color3.new(1,1,1),ZIndex=22})
 connect(diagClose.Activated,function() diagFrame.Visible=false end)
+connect(copyBtn.Activated,function()
+    local ok=false
+    if type(setclipboard)=="function" then
+        ok=pcall(setclipboard,diagText.Text)
+    elseif type(toclipboard)=="function" then
+        ok=pcall(toclipboard,diagText.Text)
+    end
+    if ok then copyBtn.Text="COPIADO" else
+        copyBtn.Text="SELECIONAR"
+        diagText:CaptureFocus()
+        pcall(function() diagText.CursorPosition=#diagText.Text+1; diagText.SelectionStart=1 end)
+    end
+    task.delay(2,function() if copyBtn.Parent then copyBtn.Text="COPIAR" end end)
+end)
 local drag, dragStart, startPos
 connect(header.InputBegan,function(i)
     if i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseButton1 then
@@ -204,6 +245,7 @@ local function selected(obj)
     local n=string.lower(obj.Name)
     local categoryOK=filter==1 or filter==4 or (filter==2 and contains(n,large)) or (filter==3 and contains(n,{"fish","peixe"}))
     if not categoryOK then return false end
+    if speciesFilter~="" and not string.find(n,speciesFilter,1,true) then return false end
     if rarityFilter~="Todos" then
         local rarity=readField(obj,rarityKeys)
         if rarity==nil or string.lower(tostring(rarity))~=string.lower(rarityFilter) then return false end
@@ -234,29 +276,40 @@ local function visible(obj)
     return p==pg and not obj:IsDescendantOf(gui)
 end
 local function normalized(s)
-    return string.upper((s or ""):gsub("<[^>]*>",""):gsub("^%s+",""):gsub("%s+$",""))
+    local t=(s or ""):gsub("<[^>]*>",""):gsub("^%s+",""):gsub("%s+$","")
+    for a,b in pairs({["Ç"]="C",["ç"]="c",["Ã"]="A",["ã"]="a",["Á"]="A",["á"]="a",["É"]="E",["é"]="e",["Ê"]="E",["ê"]="e",["Í"]="I",["í"]="i",["Ó"]="O",["ó"]="o",["Ú"]="U",["ú"]="u"}) do
+        t=t:gsub(a,b)
+    end
+    return string.upper(t)
 end
 local function controls()
-    local found={}
+    local found={texts={},buttons={}}
     local function buttonFor(o)
         if o:IsA("GuiButton") then return o end
-        return o:FindFirstAncestorWhichIsA("GuiButton") or o
+        return o:FindFirstAncestorWhichIsA("GuiButton")
     end
     for _,o in ipairs(pg:GetDescendants()) do
         if (o:IsA("TextButton") or o:IsA("TextLabel")) and visible(o) and o.AbsoluteSize.X>3 and o.AbsoluteSize.Y>3 then
             local t=normalized(o.Text)
-            if t=="DIVE" or t=="MERGULHAR" then found.dive=buttonFor(o)
-            elseif t=="CLICK" or t=="CLIQUE" or t=="TAP" or t=="TOQUE" then found.reel=buttonFor(o)
-            elseif t=="RETURN" or t=="RETORNAR" or t=="VOLTAR" or t=="SURFACE" or t=="SUBIR" then found.surface=buttonFor(o) end
+            local b=buttonFor(o)
+            if t=="DIVE" or t=="MERGULHAR" then if b then found.dive=b end; found.diveText=true
+            elseif t=="CLICK" or t=="CLIQUE" or t=="TAP" or t=="TOQUE" then found.reel=b or o
+            elseif t=="SPACE" or t=="ESPACO" then found.returnButton=b; found.returnText=true
+            elseif string.find(t,"SPACE TO RETURN",1,true) or string.find(t,"ESPACO PARA VOLTAR",1,true) then found.returnText=true
+            elseif t=="SUBIR" or t=="ASCEND" then found.up=true
+            elseif t=="DESCER" or t=="DESCEND" then found.down=true
+            elseif string.find(t,"BOLSA CHEIA",1,true) or string.find(t,"BAG FULL",1,true) then found.full=true
+            elseif t=="FEED" or t=="ALIMENTAR" then if b then found.feed=b end
+            end
         end
     end
+    found.underwater=found.returnText or found.full or (found.up and found.down)
     return found
 end
 local function center(o)
     local p=o.AbsolutePosition+o.AbsoluteSize/2
-    local sg=o:FindFirstAncestorWhichIsA("ScreenGui")
-    if sg and not sg.IgnoreGuiInset then local inset=GuiService:GetGuiInset(); p=p+inset end
-    return p
+    local inset=GuiService:GetGuiInset()
+    return p+inset
 end
 local lastInput="nenhum teste"
 local eventLog={}
@@ -266,12 +319,17 @@ local function log(message)
 end
 local function tap(point)
     if not vim then lastInput="Entrada virtual indisponivel"; return false,lastInput end
-    if diagFrame.Visible then return false,"Feche o diagnostico" end
+    if diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then return false,"Entrada pausada: menu/diagnostico/teclado" end
     local p=panel.AbsolutePosition
     local inset=GuiService:GetGuiInset()
     p=p+inset
     local s=panel.AbsoluteSize
     if panel.Visible and point.X>=p.X and point.X<=p.X+s.X and point.Y>=p.Y and point.Y<=p.Y+s.Y then return false,"Feche o painel para liberar o alvo" end
+    local cam=workspace.CurrentCamera
+    if not cam then return false,"Camera indisponivel" end
+    if point.X<8 or point.X>cam.ViewportSize.X-8 or point.Y<60 or point.Y>cam.ViewportSize.Y-8 then return false,"Coordenada fora da area permitida" end
+    local fp=floating.AbsolutePosition+inset
+    if point.X>=fp.X and point.X<=fp.X+floating.AbsoluteSize.X and point.Y>=fp.Y and point.Y<=fp.Y+floating.AbsoluteSize.Y then return false,"Botao HM sobre a entrada" end
     local ok,err=pcall(function()
         vim:SendMouseButtonEvent(math.floor(point.X),math.floor(point.Y),0,true,game,0)
         vim:SendMouseButtonEvent(math.floor(point.X),math.floor(point.Y),0,false,game,0)
@@ -279,6 +337,17 @@ local function tap(point)
     lastInput=ok and "Toque enviado (captura nao confirmada)" or tostring(err):sub(1,220)
     log(string.format("input (%d,%d): %s",math.floor(point.X),math.floor(point.Y),lastInput))
     return ok,ok and "Toque enviado" or "Entrada bloqueada: veja diagnostico"
+end
+local function keyPress(key,hold)
+    if not vim or GuiService.MenuIsOpen or diagFrame.Visible or UIS:GetFocusedTextBox() then return false end
+    local ok,err=pcall(function()
+        vim:SendKeyEvent(true,key,false,game)
+        task.wait(hold or 0.08)
+        vim:SendKeyEvent(false,key,false,game)
+    end)
+    if not ok then pcall(function() vim:SendKeyEvent(false,key,false,game) end) end
+    log("tecla "..key.Name..": "..(ok and "enviada" or tostring(err)))
+    return ok
 end
 local function target()
     local cam=workspace.CurrentCamera
@@ -299,7 +368,7 @@ local function target()
                         n=w and -w or math.huge
                     end
                     if n<math.huge and (not score or n<score) then
-                        best={point=v,name=obj.Name,weight=w,depth=p.Z}; score=n
+                        best={point=v,name=obj.Name,weight=w,depth=p.Z,object=obj}; score=n
                     end
                 end
             end
@@ -309,6 +378,7 @@ local function target()
 end
 local function cleanup()
     if not alive then return end
+    pcall(function() RunService:UnbindFromRenderStep(aimBinding) end)
     alive=false
     for _,c in ipairs(connections) do c:Disconnect() end
     for _,h in pairs(highlights) do h:Destroy() end
@@ -316,40 +386,69 @@ local function cleanup()
 end
 connect(stop.Event,cleanup)
 connect(close.Activated,function() setPanel(false) end)
+RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Camera.Value+1,function(dt)
+    aimError=math.huge
+    if not alive or not options.aim or currentState~="underwater" or panel.Visible or diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then return end
+    local cam=workspace.CurrentCamera
+    local obj=lockedTarget and lockedTarget.object
+    if not cam or not obj or not obj:IsDescendantOf(workspace) or not selected(obj) then return end
+    local ok,cf=pcall(function() return obj:GetBoundingBox() end)
+    if not ok then return end
+    local direction=cf.Position-cam.CFrame.Position
+    if direction.Magnitude<0.5 then return end
+    local goal=CFrame.lookAt(cam.CFrame.Position,cf.Position)
+    cam.CFrame=cam.CFrame:Lerp(goal,1-math.exp(-16*math.min(dt,0.1)))
+    aimError=math.deg(math.acos(math.clamp(cam.CFrame.LookVector:Dot(direction.Unit),-1,1)))
+end)
 connect(diagnostic.Activated,function()
-    local lines={"HarpoonMobile v0.4", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts), "=== Modelos reconhecidos ==="}
-    local count=0
-    local totalModels,knownWeights,knownRarities=0,0,0
-    for obj in pairs(models) do
-        totalModels=totalModels+1
-        if readField(obj,weightKeys)~=nil then knownWeights=knownWeights+1 end
-        if readField(obj,rarityKeys)~=nil then knownRarities=knownRarities+1 end
+    local lines={"HarpoonMobile v0.5", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Estado: "..currentState, "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts)}
+    local c=controls()
+    for _,k in ipairs({"underwater","full","returnText","up","down","diveText","dive","reel","feed"}) do
+        local x=c[k]
+        table.insert(lines,k..": "..(typeof(x)=="Instance" and (x.Name.." ["..x.ClassName.."]") or tostring(x)))
     end
-    table.insert(lines,string.format("Modelos: %d | Peso conhecido: %d | Raridade conhecida: %d",totalModels,knownWeights,knownRarities))
+    local cam=workspace.CurrentCamera
+    if cam then table.insert(lines,"Viewport: "..tostring(cam.ViewportSize).." | camera: "..tostring(cam.CameraType)) end
+    local groups={}
     for obj in pairs(models) do
-        if count>=60 then break end
-        local rarity,rkey=readField(obj,rarityKeys)
-        local weight,wkey=readField(obj,weightKeys)
-        count=count+1
-        table.insert(lines,string.format("%s | raridade=%s [%s] | peso=%s [%s]",obj.Name,tostring(rarity or "?"),tostring(rkey or "-"),tostring(weight or "?"),tostring(wkey or "-")))
-    end
-    table.insert(lines,"=== Textos de pesca visiveis ===")
-    local seen={}
-    local total=0
-    for _,o in ipairs(pg:GetDescendants()) do
-        if total>=60 then break end
-        if (o:IsA("TextLabel") or o:IsA("TextButton")) and visible(o) then
-            local t=normalized(o.Text)
-            if contains(string.lower(t),{"fish","peixe","mergul","dive","reel","clique","toque","tap","rarity","raridade","weight","peso","kg","harpoon","arpao","captur","recolh"}) and not seen[t] then
-                seen[t]=true; total=total+1; table.insert(lines,t:sub(1,100))
+        if obj:IsDescendantOf(workspace) then
+            local name=obj.Name
+            local g=groups[name] or {count=0,weights={},rarities={},attributes={}}
+            groups[name]=g
+            g.count=g.count+1
+            local w=weightNumber(readField(obj,weightKeys))
+            if w then table.insert(g.weights,w) end
+            local rare=readField(obj,rarityKeys)
+            if rare then g.rarities[tostring(rare)]=true end
+            for k,v in pairs(obj:GetAttributes()) do
+                if table.find(rarityKeys,string.lower(k)) or table.find(weightKeys,string.lower(k)) then g.attributes[k]=typeof(v) end
             end
         end
     end
-    table.insert(lines,"=== Controles reconhecidos agora ===")
-    local c=controls()
-    for _,k in ipairs({"dive","reel","surface"}) do
-        local o=c[k]
-        table.insert(lines,k..": "..(o and (o.Name.." / "..o.ClassName) or "nao encontrado"))
+    local sorted={}
+    for name in pairs(groups) do table.insert(sorted,name) end
+    table.sort(sorted)
+    table.insert(lines,"=== Todas as especies reconhecidas (resumo de pesos) ===")
+    for _,name in ipairs(sorted) do
+        local g=groups[name]
+        table.sort(g.weights)
+        local rarities={}
+        for v in pairs(g.rarities) do table.insert(rarities,v) end
+        table.sort(rarities)
+        table.insert(lines,string.format("%s | qtd=%d | peso min=%s max=%s | raridades=%s",name,g.count,tostring(g.weights[1] or "?"),tostring(g.weights[#g.weights] or "?"),#rarities>0 and table.concat(rarities,",") or "?"))
+    end
+    table.insert(lines,"=== Interface de pesca visivel ===")
+    local seen={}
+    local total=0
+    for _,o in ipairs(pg:GetDescendants()) do
+        if total>=150 then break end
+        if (o:IsA("TextLabel") or o:IsA("TextButton")) and visible(o) and o.AbsoluteSize.X>2 and o.AbsoluteSize.Y>2 then
+            local t=normalized(o.Text)
+            if contains(string.lower(t),{"fish","peixe","mergul","dive","reel","clique","toque","tap","rarity","raridade","weight","peso","kg","harpoon","arpao","captur","recolh","bolsa","bag","espaco","space","subir","descer","ascend","descend","feed","aliment","evol","eat","comer","depth","profund","mukbang","return","voltar"}) and not seen[t] then
+                seen[t]=true; total=total+1
+                table.insert(lines,string.format("%s | %s | %s | pos=%s size=%s",t:sub(1,120),o.Name,o.ClassName,tostring(o.AbsolutePosition),tostring(o.AbsoluteSize)))
+            end
+        end
     end
     table.insert(lines,"=== Historico recente de entrada ===")
     for _,v in ipairs(eventLog) do table.insert(lines,v) end
@@ -358,51 +457,77 @@ connect(diagnostic.Activated,function()
     setPanel(false)
 end)
 task.spawn(function()
-    local previousState=""
-    local uiCache={}
-    local lastUiScan=-math.huge
     local lastEspUpdate=-math.huge
+    local lastTarget=-math.huge
+    local previousState=""
     while alive and gui.Parent do
-        local tickNow=os.clock()
-        if tickNow-lastEspUpdate>=0.4 then updateEsp(); lastEspUpdate=tickNow end
+        local now=os.clock()
+        if now-lastEspUpdate>=0.5 then updateEsp(); lastEspUpdate=now end
+        if now-lastScan>=0.15 then controlCache=controls(); lastScan=now end
+        local c=controlCache
+        currentState=game.PlaceId~=113384248926706 and "unknown" or c.full and "full" or c.reel and "reel" or c.underwater and "underwater" or (c.diveText or c.feed) and "surface" or "unknown"
+        if previousState~=currentState then
+            log("estado: "..currentState); previousState=currentState
+            lockedTarget=nil
+        end
         local n=0
         for _ in pairs(models) do n=n+1 end
-        counter.Text=string.format("Alvos: %d | Tentativas: %d",n,attempts)
-        if options.fish or options.reel or options.dive or options.surface then
-            local now=os.clock()
-            if now-lastUiScan>=0.3 then uiCache=controls(); lastUiScan=now end
-            local c=uiCache
-            local state=c.dive and "dive" or c.reel and "reel" or c.surface and "surface" or "sem controle reconhecido"
-            if state~=previousState then log("estado: "..state); previousState=state end
-            local ok,msg
-            if c.dive then
-                status.Text="Superficie: aguardando mergulho"
-                if options.dive and now-lastDive>3 then
-                    lastDive=now; ok,msg=tap(center(c.dive))
-                    status.Text=ok and "Mergulho solicitado" or msg
-                end
-            elseif c.reel then
-                status.Text="Minigame de recolhimento"
-                if options.reel and now-lastReel>=interval then
-                    lastReel=now; ok,msg=tap(center(c.reel))
-                    status.Text=ok and "Reel: tentativa de toque" or msg
-                end
-            elseif c.surface and options.surface then
-                if now-lastSurface>3 then
-                    lastSurface=now; ok,msg=tap(center(c.surface))
-                    status.Text=ok and "Retorno solicitado" or msg
-                end
-            elseif options.fish and now-lastShot>=interval then
-                lastShot=now
-                local t=target()
-                if t then
-                    ok,msg=tap(t.point)
-                    if ok then attempts=attempts+1 end
-                    status.Text=ok and ("Disparo: "..t.name) or msg
-                else status.Text="Nenhum alvo visivel identificado" end
+        counter.Text=string.format("Alvos: %d | Disparos: %d",n,attempts)
+        if panel.Visible or diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then
+            status.Text="Pausado enquanto menu aberto"
+            lockedTarget=nil
+        elseif currentState=="full" then
+            status.Text="Bolsa cheia: pare de atirar"
+            lockedTarget=nil
+            if options.surface and now-lastSurface>=3 then lastSurface=now; keyPress(Enum.KeyCode.Space) end
+        elseif currentState=="reel" then
+            status.Text="Recolhimento experimental"
+            lockedTarget=nil
+            if options.reel and now-lastReel>=interval and c.reel and visible(c.reel) then
+                lastReel=now; tap(center(c.reel))
             end
-        else status.Text="Pronto. Ative os modulos desejados." end
-        task.wait(0.10)
+        elseif currentState=="surface" then
+            status.Text="Superficie confirmada"
+            lockedTarget=nil
+            if options.feed and c.feed and visible(c.feed) and now-lastFeed>3 then
+                lastFeed=now; tap(center(c.feed)); log("feed: tentativa de botao visivel")
+            elseif options.dive and c.dive and visible(c.dive) and now-lastDive>3 then
+                lastDive=now; tap(center(c.dive)); log("dive: tentativa de botao visivel")
+            end
+        elseif currentState=="underwater" then
+            status.Text="Submerso"
+            if options.up~=options.down and now-lastMove>0.8 then
+                lastMove=now
+                keyPress(options.up and Enum.KeyCode.E or Enum.KeyCode.Q,0.25)
+            elseif options.surface and not options.fish and now-lastSurface>=3 then
+                lastSurface=now; keyPress(Enum.KeyCode.Space)
+            end
+            if options.fish or options.aim then
+                if not lockedTarget or not lockedTarget.object:IsDescendantOf(workspace) or not selected(lockedTarget.object) or (not options.aim and now-lastTarget>=0.2) then
+                    lockedTarget=target(); lastTarget=now
+                end
+                if lockedTarget then
+                    local cam=workspace.CurrentCamera
+                    local pos=lockedTarget.object:GetPivot().Position
+                    local point,on=cam:WorldToViewportPoint(pos)
+                    if options.aim then
+                        status.Text=string.format("Mira: %s | %.1f graus",lockedTarget.name,aimError)
+                    end
+                    if options.fish and now-lastShot>=interval and on and point.Z>0 and (not options.aim or aimError<=3) then
+                        lastShot=now
+                        local p=options.aim and cam.ViewportSize/2 or Vector2.new(point.X,point.Y)
+                        local ok,msg=tap(p)
+                        if ok then attempts=attempts+1 end
+                        status.Text=ok and ("Disparo: "..lockedTarget.name) or msg
+                    end
+                    if not on and now-lastTarget>1.5 then lockedTarget=nil end
+                else status.Text="Nenhum alvo corresponde aos filtros" end
+            else lockedTarget=nil end
+        else
+            lockedTarget=nil
+            status.Text="Estado desconhecido: entrada pausada"
+        end
+        task.wait(0.08)
     end
 end)
-print("HarpoonMobile v0.4 carregado | PlaceId: "..tostring(game.PlaceId))
+print("HarpoonMobile v0.5 carregado | PlaceId: "..tostring(game.PlaceId))
