@@ -1,4 +1,6 @@
--- HarpoonMobile v0.9 | mobile tabs and structured diagnostics
+-- HarpoonMobile v0.10 | mobile tabs and structured diagnostics
+-- Data schema references: MaximumADHD/Roblox-Client-Tracker, rojo-rbx/rbx-dom,
+-- Roblox/luau-tag-utils (public API conventions). No third-party code loaded.
 -- Architecture references: Iris (UI state), RbxUtil/Trove (lifecycle),
 -- littensy/fishing-minigame (separate components). Original implementation.
 local Players = game:GetService("Players")
@@ -40,7 +42,7 @@ local selectionRevision=0
 local previousRevision=-1
 local lockedTarget = nil
 local aimError = math.huge
-local aimBinding = "HarpoonMobileAimV09"
+local aimBinding = "HarpoonMobileAimV010"
 local controlCache = {}
 local lastMove,lastFeed = 0,0
 local lastScan = 0
@@ -104,7 +106,7 @@ local function btn(parent,value,size,pos)
     round(b,6)
     return b
 end
-label(header,"  HARPOON MOBILE  /  0.9",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
+label(header,"  HARPOON MOBILE  /  0.10",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
 local minimize = btn(header,"-",UDim2.fromOffset(29,29),UDim2.new(1,-64,0,5))
 local close = btn(header,"X",UDim2.fromOffset(29,29),UDim2.new(1,-32,0,5))
 local body = new("ScrollingFrame",panel,{Position=UDim2.fromOffset(0,73),Size=UDim2.new(1,0,1,-73),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,CanvasSize=UDim2.fromOffset(0,730)})
@@ -243,6 +245,7 @@ end)
 filtersPage.CanvasSize=UDim2.fromOffset(0,255)
 local dataInfo=label(dataPage,"Relatorio da sessao: estados, erros, pesos e atributos observados.",UDim2.new(1,-20,0,54),UDim2.fromOffset(10,5),12)
 dataInfo.TextWrapped=true
+dataInfo.Text="TXT resumido ou JSON com dados por exemplar, cobertura e campos ausentes."
 move(diagnostic,dataPage,67)
 local endButton=btn(dataPage,"ENCERRAR PAINEL E LIMPAR",UDim2.new(1,-20,0,34),UDim2.fromOffset(10,110))
 connect(endButton.Activated,function() stop:Fire() end)
@@ -527,7 +530,7 @@ RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Camera.Value+1,functi
     if not ok and alive then aimError=math.huge; recordError(err) end
 end)
 local function buildDiagnostic()
-    local lines={"HarpoonMobile v0.9", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Estado: "..currentState, "Pausa anterior: "..pauseReason, "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts)}
+    local lines={"HarpoonMobile v0.10", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Estado: "..currentState, "Pausa anterior: "..pauseReason, "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts)}
     local activeOptions={}
     for k,v in pairs(options) do if v then table.insert(activeOptions,k) end end
     table.sort(activeOptions)
@@ -550,20 +553,60 @@ local function buildDiagnostic()
     local cam=workspace.CurrentCamera
     if cam then table.insert(lines,"Viewport: "..tostring(cam.ViewportSize).." | camera: "..tostring(cam.CameraType)) end
     local groups={}
+    local records={}
+    local coverage={models=0,weight=0,size=0,mutation=0,rarity=0,archetype=0,invalidWeight=0}
     for obj in pairs(models) do
         if obj:IsDescendantOf(workspace) then
             local name=obj.Name
-            local g=groups[name] or {count=0,weights={},rarities={},attributes={}}
+            local g=groups[name] or {count=0,weights={},rarities={},attributes={},mutations={},knownSizeCount=0,knownRarityCount=0,knownMutationCount=0}
             groups[name]=g
             g.count=g.count+1
             local w=weightNumber(readField(obj,weightKeys))
-            if w then table.insert(g.weights,w) end
             local rare=readField(obj,rarityKeys)
-            if rare then g.rarities[tostring(rare)]=true end
+            local attrs=obj:GetAttributes()
+            local size=attrs.Size
+            local mutation=attrs.Mutation
+            local archetype=attrs.Archetype
+            local function validNumber(v) return type(v)=="number" and v==v and math.abs(v)<math.huge end
+            coverage.models=coverage.models+1
+            if validNumber(w) and w>=0 then
+                table.insert(g.weights,w)
+                coverage.weight=coverage.weight+1
+            else
+                if w~=nil then coverage.invalidWeight=coverage.invalidWeight+1 end
+                w=nil
+            end
+            if type(rare)=="string" and rare~="" or validNumber(rare) then
+                g.rarities[tostring(rare)]=true
+                g.knownRarityCount=g.knownRarityCount+1
+                coverage.rarity=coverage.rarity+1
+            else rare=nil end
+            if validNumber(size) and size>=0 then
+                coverage.size=coverage.size+1
+                g.knownSizeCount=g.knownSizeCount+1
+            else size=nil end
+            if type(mutation)=="string" and mutation~="" then
+                coverage.mutation=coverage.mutation+1
+                g.knownMutationCount=g.knownMutationCount+1
+                g.mutations[mutation]=true
+            else mutation=nil end
+            if type(archetype)=="string" and archetype~="" then
+                coverage.archetype=coverage.archetype+1
+            else archetype=nil end
+            table.insert(records,{species=name,weight=w,size=size,mutation=mutation,rarity=rare,archetype=archetype})
             for k,v in pairs(obj:GetAttributes()) do
                 if table.find(rarityKeys,string.lower(k)) or table.find(weightKeys,string.lower(k)) then g.attributes[k]=typeof(v) end
             end
         end
+    end
+    table.sort(records,function(a,b)
+        if a.species~=b.species then return a.species<b.species end
+        if (a.weight or -1)~=(b.weight or -1) then return (a.weight or -1)<(b.weight or -1) end
+        return (a.mutation or "")<(b.mutation or "")
+    end)
+    table.insert(lines,"=== Cobertura dos dados ===")
+    for _,k in ipairs({"models","weight","size","mutation","rarity","archetype","invalidWeight"}) do
+        table.insert(lines,k..": "..tostring(coverage[k]).." / "..tostring(coverage.models))
     end
     local speciesRows={}
     local sorted={}
@@ -576,7 +619,10 @@ local function buildDiagnostic()
         local rarities={}
         for v in pairs(g.rarities) do table.insert(rarities,v) end
         table.sort(rarities)
-        table.insert(speciesRows,{name=name,count=g.count,knownWeightCount=#g.weights,minWeight=g.weights[1],maxWeight=g.weights[#g.weights],rarities=rarities})
+        local mutations={}
+        for v in pairs(g.mutations) do table.insert(mutations,v) end
+        table.sort(mutations)
+        table.insert(speciesRows,{name=name,count=g.count,knownWeightCount=#g.weights,minWeight=g.weights[1],maxWeight=g.weights[#g.weights],rarities=rarities,mutations=mutations,knownRarityCount=g.knownRarityCount,knownMutationCount=g.knownMutationCount,knownSizeCount=g.knownSizeCount})
         table.insert(lines,string.format("%s | qtd=%d | peso min=%s max=%s | raridades=%s",name,g.count,tostring(g.weights[1] or "?"),tostring(g.weights[#g.weights] or "?"),#rarities>0 and table.concat(rarities,",") or "?"))
     end
     table.insert(lines,"=== Metadados de pesca encontrados ===")
@@ -620,15 +666,16 @@ local function buildDiagnostic()
     for _,v in ipairs(eventLog) do table.insert(lines,v) end
     reportText=table.concat(lines,"\n")
     local data={
-        schemaVersion=1,version="0.9",placeId=game.PlaceId,universeId=game.GameId,
+        schemaVersion=2,version="0.10",placeId=game.PlaceId,universeId=game.GameId,
         state=currentState,pauseReason=pauseReason,attempts=attempts,lastInput=lastInput,
         runtimeErrors=runtimeErrors,lastRuntimeError=lastRuntimeError,
         activeOptions=activeOptions,
         filters={species=speciesFilter,rarity=rarityFilter,minWeight=minWeight,maxWeight=maxWeight,mode=modes[filter],interval=interval},
-        species=speciesRows,metadataSample={},stateHistory=stateHistory,events=eventLog,
-        observedControls=c.evidence or {},rawWeightUnit="unverified"
+        species=speciesRows,coverage=coverage,observations={},metadataSample={},stateHistory=stateHistory,events=eventLog,
+        observedControls=c.evidence or {},rawWeightUnit="unverified",observationCount=#records,observationLimit=1000,observationsTruncated=#records>1000,source="previously observed client metadata; not a server or memory dump"
     }
     for i=1,math.min(#metaKeys,40) do table.insert(data.metadataSample,metaKeys[i]) end
+    for i=1,math.min(#records,1000) do table.insert(data.observations,records[i]) end
     local encoded,json=pcall(function() return HttpService:JSONEncode(data) end)
     reportJson=encoded and json or ("JSON indisponivel: "..tostring(json))
     jsonMode=false
@@ -766,4 +813,4 @@ task.spawn(function()
         task.wait(0.08)
     end
 end)
-print("HarpoonMobile v0.9 carregado | PlaceId: "..tostring(game.PlaceId))
+print("HarpoonMobile v0.10 carregado | PlaceId: "..tostring(game.PlaceId))
