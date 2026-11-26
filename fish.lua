@@ -1,10 +1,10 @@
--- HarpoonMobile v0.2 | mobile dashboard / visible input prototype
+-- HarpoonMobile v0.3 | persistent mobile menu and client-visible diagnostics
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
 local player = Players.LocalPlayer
-if not player or game.PlaceId ~= 113384248926706 then
-    warn("HarpoonMobile: jogo incompativel")
+if not player then
+    warn("HarpoonMobile: LocalPlayer indisponivel")
     return
 end
 local pg = player:WaitForChild("PlayerGui")
@@ -16,6 +16,28 @@ end
 local alive = true
 local options = {fish=false, reel=false, dive=false, surface=false, esp=false}
 local interval = 0.8
+local rarityFilter = "Todos"
+local minWeight, maxWeight = nil, nil
+local rarityKeys = {"rarity","tier","raridade","fishrarity"}
+local weightKeys = {"weight","weightkg","peso","fishweight","mass"}
+local function readField(obj, keys)
+    for _,node in pairs({obj, obj:FindFirstChild("Stats"), obj:FindFirstChild("Data"), obj:FindFirstChild("Configuration")}) do
+        if node then
+            for k,v in pairs(node:GetAttributes()) do
+                if table.find(keys,string.lower(k)) and (type(v)=="string" or type(v)=="number") then return v,k end
+            end
+            for _,child in ipairs(node:GetChildren()) do
+                if table.find(keys,string.lower(child.Name)) and (child:IsA("StringValue") or child:IsA("NumberValue") or child:IsA("IntValue")) then return child.Value,child.Name end
+            end
+        end
+    end
+    return nil
+end
+local function weightNumber(v)
+    if type(v)=="number" then return v end
+    if type(v)~="string" then return nil end
+    return tonumber((v:gsub(",","."):match("^%s*([%d%.]+)%s*$") or ""))
+end
 local filter = 1
 local modes = {"Todos", "Grandes", "Peixes"}
 local keywords = {"fish", "shark", "kraken", "megalodon", "crocodon", "nightcrawler", "hexjaw", "shrimp", "hydra", "ray", "peixe", "tubarao"}
@@ -40,7 +62,7 @@ local function connect(signal, fn)
     table.insert(connections,c)
     return c
 end
-local gui = new("ScreenGui",pg,{Name="HarpoonMobileV2",ResetOnSpawn=false,DisplayOrder=100,IgnoreGuiInset=false})
+local gui = new("ScreenGui",pg,{Name="HarpoonMobileV2",ResetOnSpawn=false,DisplayOrder=10000,IgnoreGuiInset=false,ZIndexBehavior=Enum.ZIndexBehavior.Sibling})
 local stop = new("BindableEvent",gui,{Name="Stop"})
 local panel = new("Frame",gui,{Size=UDim2.fromOffset(282,310),Position=UDim2.new(0,12,0.5,-155),BackgroundColor3=Color3.fromRGB(17,24,39),BorderSizePixel=0,ClipsDescendants=true,Active=true})
 round(panel,12)
@@ -53,10 +75,10 @@ local function btn(parent,value,size,pos)
     round(b,6)
     return b
 end
-label(header,"  HARPOON MOBILE  /  0.2",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
+label(header,"  HARPOON MOBILE  /  0.3",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
 local minimize = btn(header,"-",UDim2.fromOffset(29,29),UDim2.new(1,-64,0,5))
 local close = btn(header,"X",UDim2.fromOffset(29,29),UDim2.new(1,-32,0,5))
-local body = new("ScrollingFrame",panel,{Position=UDim2.fromOffset(0,39),Size=UDim2.new(1,0,1,-39),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,CanvasSize=UDim2.fromOffset(0,360)})
+local body = new("ScrollingFrame",panel,{Position=UDim2.fromOffset(0,39),Size=UDim2.new(1,0,1,-39),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,CanvasSize=UDim2.fromOffset(0,490)})
 local status = label(body,"Inicializando...",UDim2.new(1,-18,0,32),UDim2.fromOffset(10,6),12)
 status.TextWrapped=true
 local buttons = {}
@@ -88,13 +110,42 @@ connect(plus.Activated,function() change(0.1) end)
 local counter=label(body,"Alvos: 0 | Tentativas: 0",UDim2.new(1,-20,0,25),UDim2.fromOffset(10,281),12)
 local hint=label(body,"Mergulhe antes de ativar Auto Fish. Reel depende do timing do jogo.",UDim2.new(1,-20,0,42),UDim2.fromOffset(10,306),11)
 hint.TextWrapped=true
-local mini=false
-connect(minimize.Activated,function()
-    mini=not mini
-    body.Visible=not mini
-    panel.Size=UDim2.fromOffset(282,mini and 39 or 310)
-    minimize.Text=mini and "+" or "-"
-end)
+local floating = btn(gui,"HM",UDim2.fromOffset(58,58),UDim2.new(1,-10,0.5,0))
+floating.AnchorPoint=Vector2.new(1,0.5)
+floating.BackgroundColor3=Color3.fromRGB(0,112,210)
+floating.TextSize=18
+floating.ZIndex=100
+local function setPanel(open)
+    panel.Visible=open
+    floating.Text=open and "HM -" or "HM +"
+end
+setPanel(false)
+connect(floating.Activated,function() setPanel(not panel.Visible) end)
+connect(minimize.Activated,function() setPanel(false) end)
+local rarityInput=new("TextBox",body,{Size=UDim2.new(1,-20,0,30),Position=UDim2.fromOffset(10,350),Text="",PlaceholderText="Raridade exata (vazio = todas)",ClearTextOnFocus=false,BackgroundColor3=Color3.fromRGB(51,65,85),TextColor3=Color3.new(1,1,1),PlaceholderColor3=Color3.fromRGB(190,205,220),Font=Enum.Font.Gotham,TextSize=12})
+round(rarityInput,6)
+connect(rarityInput.FocusLost,function() rarityFilter=rarityInput.Text:match("^%s*(.-)%s*$"); if rarityFilter=="" then rarityFilter="Todos" end end)
+local function weightBox(x,placeholder)
+    local b=new("TextBox",body,{Size=UDim2.new(0.5,-15,0,30),Position=UDim2.fromOffset(x,386),Text="",PlaceholderText=placeholder,ClearTextOnFocus=false,BackgroundColor3=Color3.fromRGB(51,65,85),TextColor3=Color3.new(1,1,1),PlaceholderColor3=Color3.fromRGB(190,205,220),Font=Enum.Font.Gotham,TextSize=12})
+    round(b,6)
+    return b
+end
+local low,high=weightBox(10,"Peso minimo"),weightBox(143,"Peso maximo")
+local function readWeights()
+    minWeight=weightNumber(low.Text)
+    maxWeight=weightNumber(high.Text)
+end
+connect(low.FocusLost,readWeights)
+connect(high.FocusLost,readWeights)
+local diagnostic=btn(body,"GERAR DIAGNOSTICO",UDim2.new(1,-20,0,34),UDim2.fromOffset(10,424))
+local diagFrame=new("Frame",gui,{Size=UDim2.new(0.85,0,0.8,0),Position=UDim2.fromScale(0.5,0.5),AnchorPoint=Vector2.new(0.5,0.5),BackgroundColor3=Color3.fromRGB(15,23,42),Visible=false,ZIndex=20})
+round(diagFrame,10)
+local diagClose=btn(diagFrame,"Fechar",UDim2.fromOffset(80,32),UDim2.new(1,-90,0,6))
+diagClose.ZIndex=22
+label(diagFrame,"  Diagnostico (dados visiveis)",UDim2.new(1,-95,0,38),UDim2.fromOffset(0,0),13).ZIndex=21
+local diagScroll=new("ScrollingFrame",diagFrame,{Position=UDim2.fromOffset(8,45),Size=UDim2.new(1,-16,1,-53),CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,ScrollBarThickness=5,ZIndex=21})
+local diagText=new("TextBox",diagScroll,{Size=UDim2.new(1,-8,0,0),AutomaticSize=Enum.AutomaticSize.Y,MultiLine=true,TextWrapped=true,TextEditable=true,ClearTextOnFocus=false,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Text="",TextSize=12,Font=Enum.Font.Code,BackgroundColor3=Color3.fromRGB(30,41,59),TextColor3=Color3.new(1,1,1),ZIndex=22})
+connect(diagClose.Activated,function() diagFrame.Visible=false end)
 local drag, dragStart, startPos
 connect(header.InputBegan,function(i)
     if i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseButton1 then
@@ -126,7 +177,17 @@ connect(workspace.DescendantRemoving,remove)
 for _,obj in ipairs(workspace:GetDescendants()) do add(obj) end
 local function selected(obj)
     local n=string.lower(obj.Name)
-    return filter==1 or (filter==2 and contains(n,large)) or (filter==3 and contains(n,{"fish","peixe"}))
+    local categoryOK=filter==1 or (filter==2 and contains(n,large)) or (filter==3 and contains(n,{"fish","peixe"}))
+    if not categoryOK then return false end
+    if rarityFilter~="Todos" then
+        local rarity=readField(obj,rarityKeys)
+        if rarity==nil or string.lower(tostring(rarity))~=string.lower(rarityFilter) then return false end
+    end
+    if minWeight or maxWeight then
+        local w=weightNumber(readField(obj,weightKeys))
+        if not w or (minWeight and w<minWeight) or (maxWeight and w>maxWeight) then return false end
+    end
+    return true
 end
 local function updateEsp()
     for obj in pairs(models) do
@@ -168,18 +229,21 @@ local function center(o)
     if sg and not sg.IgnoreGuiInset then local inset=GuiService:GetGuiInset(); p=p+inset end
     return p
 end
+local lastInput="nenhum teste"
 local function tap(point)
-    if not vim then return false,"Entrada virtual indisponivel" end
+    if not vim then lastInput="Entrada virtual indisponivel"; return false,lastInput end
+    if diagFrame.Visible then return false,"Feche o diagnostico" end
     local p=panel.AbsolutePosition
     local inset=GuiService:GetGuiInset()
     p=p+inset
     local s=panel.AbsoluteSize
-    if point.X>=p.X and point.X<=p.X+s.X and point.Y>=p.Y and point.Y<=p.Y+s.Y then return false,"Mova o painel para liberar o alvo" end
+    if panel.Visible and point.X>=p.X and point.X<=p.X+s.X and point.Y>=p.Y and point.Y<=p.Y+s.Y then return false,"Feche o painel para liberar o alvo" end
     local ok,err=pcall(function()
         vim:SendMouseButtonEvent(math.floor(point.X),math.floor(point.Y),0,true,game,0)
         vim:SendMouseButtonEvent(math.floor(point.X),math.floor(point.Y),0,false,game,0)
     end)
-    return ok,ok and "Toque enviado" or "Entrada virtual bloqueada"
+    lastInput=ok and "Toque enviado (captura nao confirmada)" or tostring(err):sub(1,220)
+    return ok,ok and "Toque enviado" or "Entrada bloqueada: veja diagnostico"
 end
 local function target()
     local cam=workspace.CurrentCamera
@@ -209,7 +273,33 @@ local function cleanup()
     gui:Destroy()
 end
 connect(stop.Event,cleanup)
-connect(close.Activated,cleanup)
+connect(close.Activated,function() setPanel(false) end)
+connect(diagnostic.Activated,function()
+    local lines={"HarpoonMobile v0.3", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts), "=== Modelos reconhecidos ==="}
+    local count=0
+    for obj in pairs(models) do
+        if count>=60 then break end
+        local rarity,rkey=readField(obj,rarityKeys)
+        local weight,wkey=readField(obj,weightKeys)
+        count=count+1
+        table.insert(lines,string.format("%s | raridade=%s [%s] | peso=%s [%s]",obj.Name,tostring(rarity or "?"),tostring(rkey or "-"),tostring(weight or "?"),tostring(wkey or "-")))
+    end
+    table.insert(lines,"=== Textos de pesca visiveis ===")
+    local seen={}
+    local total=0
+    for _,o in ipairs(pg:GetDescendants()) do
+        if total>=60 then break end
+        if (o:IsA("TextLabel") or o:IsA("TextButton")) and visible(o) then
+            local t=normalized(o.Text)
+            if contains(string.lower(t),{"fish","peixe","mergul","dive","reel","clique","toque","tap","rarity","raridade","weight","peso","kg","harpoon","arpao","captur","recolh"}) and not seen[t] then
+                seen[t]=true; total=total+1; table.insert(lines,t:sub(1,100))
+            end
+        end
+    end
+    diagText.Text=table.concat(lines,"\n")
+    diagFrame.Visible=true
+    setPanel(false)
+end)
 task.spawn(function()
     while alive and gui.Parent do
         updateEsp()
@@ -250,4 +340,4 @@ task.spawn(function()
         task.wait(0.25)
     end
 end)
-print("HarpoonMobile v0.2 carregado")
+print("HarpoonMobile v0.3 carregado | PlaceId: "..tostring(game.PlaceId))
