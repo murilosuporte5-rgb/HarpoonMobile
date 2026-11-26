@@ -1,8 +1,11 @@
--- HarpoonMobile v0.8 | persistent mobile menu and client-visible diagnostics
+-- HarpoonMobile v0.9 | mobile tabs and structured diagnostics
+-- Architecture references: Iris (UI state), RbxUtil/Trove (lifecycle),
+-- littensy/fishing-minigame (separate components). Original implementation.
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local GuiService = game:GetService("GuiService")
+local HttpService = game:GetService("HttpService")
 local player = Players.LocalPlayer
 if not player then
     warn("HarpoonMobile: LocalPlayer indisponivel")
@@ -37,7 +40,7 @@ local selectionRevision=0
 local previousRevision=-1
 local lockedTarget = nil
 local aimError = math.huge
-local aimBinding = "HarpoonMobileAimV08"
+local aimBinding = "HarpoonMobileAimV09"
 local controlCache = {}
 local lastMove,lastFeed = 0,0
 local lastScan = 0
@@ -101,10 +104,10 @@ local function btn(parent,value,size,pos)
     round(b,6)
     return b
 end
-label(header,"  HARPOON MOBILE  /  0.8",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
+label(header,"  HARPOON MOBILE  /  0.9",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
 local minimize = btn(header,"-",UDim2.fromOffset(29,29),UDim2.new(1,-64,0,5))
 local close = btn(header,"X",UDim2.fromOffset(29,29),UDim2.new(1,-32,0,5))
-local body = new("ScrollingFrame",panel,{Position=UDim2.fromOffset(0,39),Size=UDim2.new(1,0,1,-39),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,CanvasSize=UDim2.fromOffset(0,730)})
+local body = new("ScrollingFrame",panel,{Position=UDim2.fromOffset(0,73),Size=UDim2.new(1,0,1,-73),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,CanvasSize=UDim2.fromOffset(0,730)})
 local status = label(body,"Inicializando...",UDim2.new(1,-18,0,32),UDim2.fromOffset(10,6),12)
 status.TextWrapped=true
 local buttons = {}
@@ -205,16 +208,75 @@ connect(pause.Activated,function()
         v.button.BackgroundColor3=Color3.fromRGB(51,65,85)
     end
 end)
+-- Arrange the existing controls into pages. No gameplay logic is changed.
+local tabbar=new("Frame",panel,{Position=UDim2.fromOffset(0,39),Size=UDim2.new(1,0,0,34),BackgroundColor3=Color3.fromRGB(15,23,42),BorderSizePixel=0})
+local pages={Controle=body}
+local function page(name)
+    local p=new("ScrollingFrame",panel,{Name=name,Position=UDim2.fromOffset(0,73),Size=UDim2.new(1,0,1,-73),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,CanvasSize=UDim2.fromOffset(0,0),Visible=false})
+    pages[name]=p
+    return p
+end
+local filtersPage=page("Filtros")
+local dataPage=page("Dados")
+local function move(o,parent,y)
+    local x=o.Position.X
+    o.Parent=parent
+    o.Position=UDim2.new(x.Scale,x.Offset,0,y)
+end
+local order={"fish","reel","dive","surface","esp","aim","down","up","feed"}
+for i,k in ipairs(order) do move(buttons[k].button,body,42+(i-1)*34) end
+move(minus,body,352); move(plus,body,352); move(delayText,body,352)
+move(counter,body,390); move(hint,body,419); move(pause,body,470)
+body.CanvasSize=UDim2.fromOffset(0,515)
+local filterInfo=label(filtersPage,"Filtros existentes: peso bruto; raridade somente se conhecida.",UDim2.new(1,-20,0,45),UDim2.fromOffset(10,5),12)
+filterInfo.TextWrapped=true
+move(f,filtersPage,56); move(speciesInput,filtersPage,94); move(rarityInput,filtersPage,132)
+move(low,filtersPage,170); move(high,filtersPage,170)
+local clearFilters=btn(filtersPage,"LIMPAR FILTROS",UDim2.new(1,-20,0,34),UDim2.fromOffset(10,210))
+connect(clearFilters.Activated,function()
+    filter=1; f.Text="Alvo: "..modes[filter]
+    speciesFilter=""; speciesInput.Text=""
+    rarityFilter="Todos"; rarityInput.Text=""
+    minWeight=nil; maxWeight=nil; low.Text=""; high.Text=""
+    selectionRevision=selectionRevision+1
+end)
+filtersPage.CanvasSize=UDim2.fromOffset(0,255)
+local dataInfo=label(dataPage,"Relatorio da sessao: estados, erros, pesos e atributos observados.",UDim2.new(1,-20,0,54),UDim2.fromOffset(10,5),12)
+dataInfo.TextWrapped=true
+move(diagnostic,dataPage,67)
+local endButton=btn(dataPage,"ENCERRAR PAINEL E LIMPAR",UDim2.new(1,-20,0,34),UDim2.fromOffset(10,110))
+connect(endButton.Activated,function() stop:Fire() end)
+dataPage.CanvasSize=UDim2.fromOffset(0,155)
+local tabButtons={}
+local function showTab(name)
+    for n,p in pairs(pages) do p.Visible=(n==name) end
+    for n,b in pairs(tabButtons) do b.BackgroundColor3=n==name and Color3.fromRGB(0,112,210) or Color3.fromRGB(51,65,85) end
+end
+for i,name in ipairs({"Controle","Filtros","Dados"}) do
+    local b=btn(tabbar,name,UDim2.new(1/3,-6,0,28),UDim2.new((i-1)/3,3,0,3))
+    tabButtons[name]=b
+    connect(b.Activated,function() showTab(name) end)
+end
+showTab("Controle")
 local diagFrame=new("Frame",gui,{Size=UDim2.new(0.85,0,0.8,0),Position=UDim2.fromScale(0.5,0.5),AnchorPoint=Vector2.new(0.5,0.5),BackgroundColor3=Color3.fromRGB(15,23,42),Visible=false,ZIndex=20})
 round(diagFrame,10)
 local diagClose=btn(diagFrame,"Fechar",UDim2.fromOffset(70,32),UDim2.new(1,-78,0,6))
 local copyBtn=btn(diagFrame,"COPIAR",UDim2.fromOffset(80,32),UDim2.new(1,-166,0,6))
+local formatBtn=btn(diagFrame,"JSON",UDim2.fromOffset(58,32),UDim2.new(1,-232,0,6))
+formatBtn.ZIndex=22
+local reportText,reportJson="", ""
+local jsonMode=false
 copyBtn.ZIndex=22
 diagClose.ZIndex=22
-label(diagFrame,"  Diagnostico (dados visiveis)",UDim2.new(1,-175,0,38),UDim2.fromOffset(0,0),13).ZIndex=21
+label(diagFrame,"  Diagnostico (dados visiveis)",UDim2.new(1,-240,0,38),UDim2.fromOffset(0,0),13).ZIndex=21
 local diagScroll=new("ScrollingFrame",diagFrame,{Position=UDim2.fromOffset(8,45),Size=UDim2.new(1,-16,1,-53),CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,ScrollBarThickness=5,ZIndex=21})
 local diagText=new("TextBox",diagScroll,{Size=UDim2.new(1,-8,0,0),AutomaticSize=Enum.AutomaticSize.Y,MultiLine=true,TextWrapped=true,TextEditable=true,ClearTextOnFocus=false,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Text="",TextSize=12,Font=Enum.Font.Code,BackgroundColor3=Color3.fromRGB(30,41,59),TextColor3=Color3.new(1,1,1),ZIndex=22})
 connect(diagClose.Activated,function() diagFrame.Visible=false end)
+connect(formatBtn.Activated,function()
+    jsonMode=not jsonMode
+    diagText.Text=jsonMode and reportJson or reportText
+    formatBtn.Text=jsonMode and "TXT" or "JSON"
+end)
 connect(copyBtn.Activated,function()
     local ok=false
     if type(setclipboard)=="function" then
@@ -427,15 +489,19 @@ local function target()
     lastTargetReason=best and ("alvo="..best.name.." peso="..tostring(best.weight)) or string.format("sem alvo: %d filtrados, %d na tela",selectedCount,visibleCount)
     return best
 end
-local function cleanup()
+local function cleanup(skipDestroy)
     if not alive then return end
-    pcall(function() RunService:UnbindFromRenderStep(aimBinding) end)
     alive=false
-    for _,c in ipairs(connections) do c:Disconnect() end
-    for _,h in pairs(highlights) do h:Destroy() end
-    gui:Destroy()
+    pcall(function() RunService:UnbindFromRenderStep(aimBinding) end)
+    for _,c in ipairs(connections) do pcall(function() c:Disconnect() end) end
+    table.clear(connections)
+    for _,h in pairs(highlights) do pcall(function() h:Destroy() end) end
+    table.clear(highlights)
+    table.clear(models)
+    if not skipDestroy then gui:Destroy() end
 end
-connect(stop.Event,cleanup)
+connect(stop.Event,function() cleanup(false) end)
+connect(gui.Destroying,function() cleanup(true) end)
 connect(close.Activated,function() setPanel(false) end)
 RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Camera.Value+1,function(dt)
     local ok,err=xpcall(function()
@@ -458,10 +524,10 @@ RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Camera.Value+1,functi
         if #aimSamples>30 then table.remove(aimSamples,1) end
     end
     end,function(e) return tostring(e) end)
-    if not ok then aimError=math.huge; recordError(err) end
+    if not ok and alive then aimError=math.huge; recordError(err) end
 end)
-connect(diagnostic.Activated,function()
-    local lines={"HarpoonMobile v0.8", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Estado: "..currentState, "Pausa anterior: "..pauseReason, "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts)}
+local function buildDiagnostic()
+    local lines={"HarpoonMobile v0.9", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Estado: "..currentState, "Pausa anterior: "..pauseReason, "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts)}
     local activeOptions={}
     for k,v in pairs(options) do if v then table.insert(activeOptions,k) end end
     table.sort(activeOptions)
@@ -499,6 +565,7 @@ connect(diagnostic.Activated,function()
             end
         end
     end
+    local speciesRows={}
     local sorted={}
     for name in pairs(groups) do table.insert(sorted,name) end
     table.sort(sorted)
@@ -509,6 +576,7 @@ connect(diagnostic.Activated,function()
         local rarities={}
         for v in pairs(g.rarities) do table.insert(rarities,v) end
         table.sort(rarities)
+        table.insert(speciesRows,{name=name,count=g.count,knownWeightCount=#g.weights,minWeight=g.weights[1],maxWeight=g.weights[#g.weights],rarities=rarities})
         table.insert(lines,string.format("%s | qtd=%d | peso min=%s max=%s | raridades=%s",name,g.count,tostring(g.weights[1] or "?"),tostring(g.weights[#g.weights] or "?"),#rarities>0 and table.concat(rarities,",") or "?"))
     end
     table.insert(lines,"=== Metadados de pesca encontrados ===")
@@ -550,9 +618,35 @@ connect(diagnostic.Activated,function()
     for _,v in ipairs(stateHistory) do table.insert(lines,v) end
     table.insert(lines,"=== Historico recente de entrada ===")
     for _,v in ipairs(eventLog) do table.insert(lines,v) end
-    diagText.Text=table.concat(lines,"\n")
+    reportText=table.concat(lines,"\n")
+    local data={
+        schemaVersion=1,version="0.9",placeId=game.PlaceId,universeId=game.GameId,
+        state=currentState,pauseReason=pauseReason,attempts=attempts,lastInput=lastInput,
+        runtimeErrors=runtimeErrors,lastRuntimeError=lastRuntimeError,
+        activeOptions=activeOptions,
+        filters={species=speciesFilter,rarity=rarityFilter,minWeight=minWeight,maxWeight=maxWeight,mode=modes[filter],interval=interval},
+        species=speciesRows,metadataSample={},stateHistory=stateHistory,events=eventLog,
+        observedControls=c.evidence or {},rawWeightUnit="unverified"
+    }
+    for i=1,math.min(#metaKeys,40) do table.insert(data.metadataSample,metaKeys[i]) end
+    local encoded,json=pcall(function() return HttpService:JSONEncode(data) end)
+    reportJson=encoded and json or ("JSON indisponivel: "..tostring(json))
+    jsonMode=false
+    formatBtn.Text="JSON"
+    diagText.Text=reportText
     diagFrame.Visible=true
     setPanel(false)
+end
+connect(diagnostic.Activated,function()
+    local ok,err=pcall(buildDiagnostic)
+    if not ok then
+        recordError(err)
+        reportText="Falha ao gerar relatorio: "..tostring(err)
+        reportJson=""
+        diagText.Text=reportText
+        diagFrame.Visible=true
+        setPanel(false)
+    end
 end)
 task.spawn(function()
     local lastEspUpdate=-math.huge
@@ -663,7 +757,7 @@ task.spawn(function()
             status.Text="Estado desconhecido: entrada pausada"
         end
         end,function(e) return tostring(e) end)
-        if not ok then
+        if not ok and alive then
             recordError(err)
             lockedTarget=nil
             status.Text="Erro recuperavel: veja diagnostico"
@@ -672,4 +766,4 @@ task.spawn(function()
         task.wait(0.08)
     end
 end)
-print("HarpoonMobile v0.8 carregado | PlaceId: "..tostring(game.PlaceId))
+print("HarpoonMobile v0.9 carregado | PlaceId: "..tostring(game.PlaceId))
