@@ -1,4 +1,4 @@
--- HarpoonMobile v0.5 | persistent mobile menu and client-visible diagnostics
+-- HarpoonMobile v0.6 | persistent mobile menu and client-visible diagnostics
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
@@ -19,9 +19,11 @@ local options = {fish=false, reel=false, dive=false, surface=false, esp=false, a
 local interval = 0.35
 local speciesFilter = ""
 local currentState = "unknown"
+local lastConfirmedUnderwater=-math.huge
+local pauseReason="inicializando"
 local lockedTarget = nil
 local aimError = math.huge
-local aimBinding = "HarpoonMobileAimV05"
+local aimBinding = "HarpoonMobileAimV06"
 local controlCache = {}
 local lastMove,lastFeed = 0,0
 local lastScan = 0
@@ -85,7 +87,7 @@ local function btn(parent,value,size,pos)
     round(b,6)
     return b
 end
-label(header,"  HARPOON MOBILE  /  0.5",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
+label(header,"  HARPOON MOBILE  /  0.6",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
 local minimize = btn(header,"-",UDim2.fromOffset(29,29),UDim2.new(1,-64,0,5))
 local close = btn(header,"X",UDim2.fromOffset(29,29),UDim2.new(1,-32,0,5))
 local body = new("ScrollingFrame",panel,{Position=UDim2.fromOffset(0,39),Size=UDim2.new(1,0,1,-39),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,CanvasSize=UDim2.fromOffset(0,730)})
@@ -283,19 +285,26 @@ local function normalized(s)
     return string.upper(t)
 end
 local function controls()
-    local found={texts={},buttons={}}
+    local found={texts={},buttons={},returnText=false,underwater=false,full=false,up=false,down=false,diveText=false}
+    local cam=workspace.CurrentCamera
+    local viewport=cam and cam.ViewportSize or Vector2.new(800,450)
+    local function onScreen(o)
+        local p,z=o.AbsolutePosition,o.AbsoluteSize
+        return p.X+z.X>0 and p.Y+z.Y>0 and p.X<viewport.X and p.Y<viewport.Y
+    end
     local function buttonFor(o)
         if o:IsA("GuiButton") then return o end
         return o:FindFirstAncestorWhichIsA("GuiButton")
     end
     for _,o in ipairs(pg:GetDescendants()) do
-        if (o:IsA("TextButton") or o:IsA("TextLabel")) and visible(o) and o.AbsoluteSize.X>3 and o.AbsoluteSize.Y>3 then
+        if (o:IsA("TextButton") or o:IsA("TextLabel")) and visible(o) and onScreen(o) and o.AbsoluteSize.X>3 and o.AbsoluteSize.Y>3 then
             local t=normalized(o.Text)
             local b=buttonFor(o)
-            if t=="DIVE" or t=="MERGULHAR" then if b then found.dive=b end; found.diveText=true
+            if t=="DIVE" or t=="MERGULHAR" or t=="DIVE IN" then if b then found.dive=b else found.dive=o end; found.diveText=true
             elseif t=="CLICK" or t=="CLIQUE" or t=="TAP" or t=="TOQUE" then found.reel=b or o
-            elseif t=="SPACE" or t=="ESPACO" then found.returnButton=b; found.returnText=true
-            elseif string.find(t,"SPACE TO RETURN",1,true) or string.find(t,"ESPACO PARA VOLTAR",1,true) then found.returnText=true
+            elseif t=="RETURN" or t=="VOLTAR" or t=="RETORNAR" then found.returnButton=b or o; found.returnText=true
+            elseif t=="SPACE" or t=="ESPACO" then found.spaceText=true
+            elseif string.find(t,"SPACE TO RETURN",1,true) or string.find(t,"ESPACO PARA VOLTAR",1,true) or string.find(t,"PRESS SPACE TO RETURN",1,true) then found.returnText=true
             elseif t=="SUBIR" or t=="ASCEND" then found.up=true
             elseif t=="DESCER" or t=="DESCEND" then found.down=true
             elseif string.find(t,"BOLSA CHEIA",1,true) or string.find(t,"BAG FULL",1,true) then found.full=true
@@ -303,13 +312,18 @@ local function controls()
             end
         end
     end
-    found.underwater=found.returnText or found.full or (found.up and found.down)
+    found.cameraScriptable=cam~=nil and cam.CameraType==Enum.CameraType.Scriptable
+    found.underwater=not found.diveText and (found.full or (found.up and found.down) or (found.returnText and found.cameraScriptable))
     return found
 end
 local function center(o)
     local p=o.AbsolutePosition+o.AbsoluteSize/2
-    local inset=GuiService:GetGuiInset()
-    return p+inset
+    local root=o:FindFirstAncestorWhichIsA("ScreenGui")
+    if root and not root.IgnoreGuiInset then
+        local inset=GuiService:GetGuiInset()
+        return p+inset
+    end
+    return p
 end
 local lastInput="nenhum teste"
 local eventLog={}
@@ -318,8 +332,8 @@ local function log(message)
     if #eventLog>40 then table.remove(eventLog,1) end
 end
 local function tap(point)
-    if not vim then lastInput="Entrada virtual indisponivel"; return false,lastInput end
-    if diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then return false,"Entrada pausada: menu/diagnostico/teclado" end
+    if not vim then lastInput="Entrada virtual indisponivel"; log(lastInput); return false,lastInput end
+    if diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then lastInput="Entrada pausada: menu/diagnostico/teclado"; return false,lastInput end
     local p=panel.AbsolutePosition
     local inset=GuiService:GetGuiInset()
     p=p+inset
@@ -401,9 +415,13 @@ RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Camera.Value+1,functi
     aimError=math.deg(math.acos(math.clamp(cam.CFrame.LookVector:Dot(direction.Unit),-1,1)))
 end)
 connect(diagnostic.Activated,function()
-    local lines={"HarpoonMobile v0.5", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Estado: "..currentState, "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts)}
+    local lines={"HarpoonMobile v0.6", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Estado: "..currentState, "Pausa anterior: "..pauseReason, "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts)}
+    local activeOptions={}
+    for k,v in pairs(options) do if v then table.insert(activeOptions,k) end end
+    table.sort(activeOptions)
+    table.insert(lines,"Modulos ativos: "..table.concat(activeOptions,","))
     local c=controls()
-    for _,k in ipairs({"underwater","full","returnText","up","down","diveText","dive","reel","feed"}) do
+    for _,k in ipairs({"underwater","cameraScriptable","full","returnText","returnButton","spaceText","up","down","diveText","dive","reel","feed"}) do
         local x=c[k]
         table.insert(lines,k..": "..(typeof(x)=="Instance" and (x.Name.." ["..x.ClassName.."]") or tostring(x)))
     end
@@ -465,7 +483,11 @@ task.spawn(function()
         if now-lastEspUpdate>=0.5 then updateEsp(); lastEspUpdate=now end
         if now-lastScan>=0.15 then controlCache=controls(); lastScan=now end
         local c=controlCache
-        currentState=game.PlaceId~=113384248926706 and "unknown" or c.full and "full" or c.reel and "reel" or c.underwater and "underwater" or (c.diveText or c.feed) and "surface" or "unknown"
+        if c.underwater then lastConfirmedUnderwater=now end
+        if c.diveText or not c.cameraScriptable then lastConfirmedUnderwater=-math.huge end
+        local recentlyUnderwater=c.cameraScriptable and not c.diveText and now-lastConfirmedUnderwater<0.8
+        currentState=game.PlaceId~=113384248926706 and "unknown" or c.full and "full" or c.diveText and "surface" or (c.reel and (c.underwater or recentlyUnderwater)) and "reel" or (c.underwater or recentlyUnderwater) and "underwater" or c.feed and "surface" or "unknown"
+        pauseReason=panel.Visible and "dashboard aberto" or diagFrame.Visible and "diagnostico aberto" or GuiService.MenuIsOpen and "menu Roblox aberto" or UIS:GetFocusedTextBox() and "teclado aberto" or currentState=="unknown" and "estado nao reconhecido" or "nenhuma"
         if previousState~=currentState then
             log("estado: "..currentState); previousState=currentState
             lockedTarget=nil
@@ -473,13 +495,17 @@ task.spawn(function()
         local n=0
         for _ in pairs(models) do n=n+1 end
         counter.Text=string.format("Alvos: %d | Disparos: %d",n,attempts)
+        if not panel.Visible then floating.Text=currentState=="underwater" and "HM\nAGUA" or currentState=="full" and "HM\nCHEIO" or currentState=="surface" and "HM\nTERRA" or currentState=="reel" and "HM\nREEL" or "HM\n?" end
         if panel.Visible or diagFrame.Visible or GuiService.MenuIsOpen or UIS:GetFocusedTextBox() then
-            status.Text="Pausado enquanto menu aberto"
+            status.Text="Pausado: "..pauseReason
             lockedTarget=nil
         elseif currentState=="full" then
             status.Text="Bolsa cheia: pare de atirar"
             lockedTarget=nil
-            if options.surface and now-lastSurface>=3 then lastSurface=now; keyPress(Enum.KeyCode.Space) end
+            if options.surface and now-lastSurface>=3 then
+                lastSurface=now
+                if c.returnButton and visible(c.returnButton) and c.returnButton:IsA("GuiButton") then tap(center(c.returnButton)) else keyPress(Enum.KeyCode.Space) end
+            end
         elseif currentState=="reel" then
             status.Text="Recolhimento experimental"
             lockedTarget=nil
@@ -508,7 +534,8 @@ task.spawn(function()
                 end
                 if lockedTarget then
                     local cam=workspace.CurrentCamera
-                    local pos=lockedTarget.object:GetPivot().Position
+                    local box=lockedTarget.object:GetBoundingBox()
+                    local pos=box.Position
                     local point,on=cam:WorldToViewportPoint(pos)
                     if options.aim then
                         status.Text=string.format("Mira: %s | %.1f graus",lockedTarget.name,aimError)
@@ -530,4 +557,4 @@ task.spawn(function()
         task.wait(0.08)
     end
 end)
-print("HarpoonMobile v0.5 carregado | PlaceId: "..tostring(game.PlaceId))
+print("HarpoonMobile v0.6 carregado | PlaceId: "..tostring(game.PlaceId))
