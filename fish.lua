@@ -1,4 +1,4 @@
--- HarpoonMobile v0.7 | persistent mobile menu and client-visible diagnostics
+-- HarpoonMobile v0.8 | persistent mobile menu and client-visible diagnostics
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
@@ -20,6 +20,14 @@ local interval = 0.35
 local speciesFilter = ""
 local currentState = "unknown"
 local lastConfirmedUnderwater=-math.huge
+local lastReelSeen=-math.huge
+local lastDiveRequest=-math.huge
+local reelEvidence={}
+local lastReelSample=-math.huge
+local lastAimSample=-math.huge
+local aimSamples={}
+local lastTargetReason="nenhum alvo avaliado"
+local selectedCount,visibleCount=0,0
 local pauseReason="inicializando"
 local runtimeErrors=0
 local lastRuntimeError="nenhum"
@@ -29,7 +37,7 @@ local selectionRevision=0
 local previousRevision=-1
 local lockedTarget = nil
 local aimError = math.huge
-local aimBinding = "HarpoonMobileAimV07"
+local aimBinding = "HarpoonMobileAimV08"
 local controlCache = {}
 local lastMove,lastFeed = 0,0
 local lastScan = 0
@@ -93,7 +101,7 @@ local function btn(parent,value,size,pos)
     round(b,6)
     return b
 end
-label(header,"  HARPOON MOBILE  /  0.7",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
+label(header,"  HARPOON MOBILE  /  0.8",UDim2.new(1,-72,1,0),UDim2.fromOffset(0,0),13)
 local minimize = btn(header,"-",UDim2.fromOffset(29,29),UDim2.new(1,-64,0,5))
 local close = btn(header,"X",UDim2.fromOffset(29,29),UDim2.new(1,-32,0,5))
 local body = new("ScrollingFrame",panel,{Position=UDim2.fromOffset(0,39),Size=UDim2.new(1,0,1,-39),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,CanvasSize=UDim2.fromOffset(0,730)})
@@ -110,7 +118,7 @@ local function toggle(key,title,y)
     end)
 end
 toggle("fish","Auto Fish / disparo",42)
-toggle("reel","Auto Reel / experimental",76)
+toggle("reel","Reel / diagnostico",76)
 toggle("dive","Auto Mergulhar",110)
 toggle("surface","Auto Retornar",144)
 toggle("esp","Fish ESP",178)
@@ -316,7 +324,7 @@ local function controls()
                 found.evidence[key]=t.." | "..o.Name
             end
             if t=="DIVE" or t=="MERGULHAR" or t=="DIVE IN" then if b then found.dive=b else found.dive=o end; found.diveText=true; evidence("dive")
-            elseif t=="CLICK" or t=="CLIQUE" or t=="TAP" or t=="TOQUE" then found.reel=b or o; evidence("reel")
+            elseif (t=="CLICK" or t=="CLIQUE" or t=="TAP" or t=="TOQUE") and (o.Name=="Key" or b) then found.reel=b or o; found.reelLabel=o; evidence("reel")
             elseif t=="RETURN" or t=="VOLTAR" or t=="RETORNAR" then found.returnButton=b or o; found.returnText=true; evidence("return")
             elseif t=="SPACE" or t=="ESPACO" then found.spaceText=true; evidence("space")
             elseif string.find(t,"SPACE TO RETURN",1,true) or string.find(t,"ESPACO PARA VOLTAR",1,true) or string.find(t,"PRESS SPACE TO RETURN",1,true) then found.returnText=true; evidence("returnPrompt")
@@ -389,17 +397,20 @@ local function keyPress(key,hold)
     return ok
 end
 local function target()
+    selectedCount,visibleCount=0,0
     local cam=workspace.CurrentCamera
     if not cam then return nil end
     local mid=cam.ViewportSize/2
     local best,score
     for obj in pairs(models) do
         if selected(obj) and obj:IsDescendantOf(workspace) then
+            selectedCount=selectedCount+1
             local part=obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart",true)
             if part then
                 local cf,size=obj:GetBoundingBox()
                 local p,on=cam:WorldToViewportPoint(cf.Position)
                 if on and p.Z>0 then
+                    visibleCount=visibleCount+1
                     local v=Vector2.new(p.X,p.Y)
                     local n=(v-mid).Magnitude
                     local w=weightNumber(readField(obj,weightKeys))
@@ -413,6 +424,7 @@ local function target()
             end
         end
     end
+    lastTargetReason=best and ("alvo="..best.name.." peso="..tostring(best.weight)) or string.format("sem alvo: %d filtrados, %d na tela",selectedCount,visibleCount)
     return best
 end
 local function cleanup()
@@ -436,14 +448,20 @@ RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Camera.Value+1,functi
     if not ok then return end
     local direction=cf.Position-cam.CFrame.Position
     if direction.Magnitude<0.5 then return end
+    local before=math.deg(math.acos(math.clamp(cam.CFrame.LookVector:Dot(direction.Unit),-1,1)))
     local goal=CFrame.lookAt(cam.CFrame.Position,cf.Position)
     cam.CFrame=cam.CFrame:Lerp(goal,1-math.exp(-16*math.min(dt,0.1)))
     aimError=math.deg(math.acos(math.clamp(cam.CFrame.LookVector:Dot(direction.Unit),-1,1)))
+    if os.clock()-lastAimSample>=0.5 then
+        lastAimSample=os.clock()
+        table.insert(aimSamples,string.format("%.2f | %s | antes=%.2f depois=%.2f",lastAimSample,obj.Name,before,aimError))
+        if #aimSamples>30 then table.remove(aimSamples,1) end
+    end
     end,function(e) return tostring(e) end)
     if not ok then aimError=math.huge; recordError(err) end
 end)
 connect(diagnostic.Activated,function()
-    local lines={"HarpoonMobile v0.7", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Estado: "..currentState, "Pausa anterior: "..pauseReason, "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts)}
+    local lines={"HarpoonMobile v0.8", "PlaceId: "..tostring(game.PlaceId), "GameId: "..tostring(game.GameId), "Estado: "..currentState, "Pausa anterior: "..pauseReason, "Entrada virtual: "..lastInput, "Tentativas: "..tostring(attempts)}
     local activeOptions={}
     for k,v in pairs(options) do if v then table.insert(activeOptions,k) end end
     table.sort(activeOptions)
@@ -451,6 +469,11 @@ connect(diagnostic.Activated,function()
     table.insert(lines,string.format("Erros de runtime: %d | ultimo: %s",runtimeErrors,lastRuntimeError))
     table.insert(lines,string.format("Filtros: especie=%s raridade=%s min=%s max=%s modo=%s intervalo=%.2f",speciesFilter,rarityFilter,tostring(minWeight),tostring(maxWeight),modes[filter],interval))
     table.insert(lines,"Entrada virtual disponivel: "..tostring(vim~=nil))
+    table.insert(lines,"Selecao: "..lastTargetReason)
+    table.insert(lines,"=== Amostras de mira ===")
+    for _,v in ipairs(aimSamples) do table.insert(lines,v) end
+    table.insert(lines,"=== Amostras do minigame (somente interface visivel) ===")
+    for _,v in ipairs(reelEvidence) do table.insert(lines,v) end
     table.insert(lines,"TouchEnabled: "..tostring(UIS.TouchEnabled).." | KeyboardEnabled: "..tostring(UIS.KeyboardEnabled))
     local c=controls()
     for _,k in ipairs({"underwater","cameraScriptable","full","returnText","returnButton","spaceText","up","down","diveText","dive","reel","feed"}) do
@@ -507,8 +530,8 @@ connect(diagnostic.Activated,function()
     local metaKeys={}
     for v in pairs(metadata) do table.insert(metaKeys,v) end
     table.sort(metaKeys)
-    for i=1,math.min(#metaKeys,250) do table.insert(lines,metaKeys[i]) end
-    if #metaKeys>250 then table.insert(lines,"Metadados limitados a 250 registros.") end
+    for i=1,math.min(#metaKeys,40) do table.insert(lines,metaKeys[i]) end
+    if #metaKeys>40 then table.insert(lines,"Amostra de metadados: 40 registros de "..#metaKeys..". Resumo de especies completo acima.") end
     table.insert(lines,"=== Interface de pesca visivel ===")
     local seen={}
     local total=0
@@ -544,9 +567,29 @@ task.spawn(function()
         if c.underwater then lastConfirmedUnderwater=now end
         if c.diveText or not c.cameraScriptable then lastConfirmedUnderwater=-math.huge end
         local recentlyUnderwater=c.cameraScriptable and not c.diveText and now-lastConfirmedUnderwater<0.8
-        currentState=game.PlaceId~=113384248926706 and "unknown" or c.full and "full" or c.diveText and "surface" or (c.reel and (c.underwater or recentlyUnderwater)) and "reel" or (c.underwater or recentlyUnderwater) and "underwater" or c.feed and "surface" or "unknown"
+        if c.reel and c.cameraScriptable and not c.diveText then lastReelSeen=now end
+        if c.diveText or not c.cameraScriptable then lastReelSeen=-math.huge end
+        local reelActive=c.cameraScriptable and not c.diveText and (c.reel~=nil or now-lastReelSeen<0.25)
+        currentState=game.PlaceId~=113384248926706 and "unknown" or c.full and "full" or c.diveText and "surface" or reelActive and "reel" or (c.underwater or recentlyUnderwater) and "underwater" or c.feed and "surface" or "unknown"
+        if currentState=="reel" and c.reelLabel and now-lastReelSample>=0.35 then
+            lastReelSample=now
+            local rows={}
+            local parent=c.reelLabel.Parent
+            if parent and parent.Parent and parent.Parent:IsA("GuiObject") then parent=parent.Parent end
+            if parent then
+                for _,o in ipairs(parent:GetDescendants()) do
+                    if #rows>=18 then break end
+                    if o:IsA("GuiObject") and visible(o) and o.AbsoluteSize.X>2 and o.AbsoluteSize.Y>2 then
+                        table.insert(rows,string.format("%s:%s rot=%.1f pos=%s size=%s",o.Name,o.ClassName,o.AbsoluteRotation,tostring(o.AbsolutePosition),tostring(o.AbsoluteSize)))
+                    end
+                end
+            end
+            table.insert(reelEvidence,string.format("%.2f | %s",now,table.concat(rows,"; ")))
+            if #reelEvidence>20 then table.remove(reelEvidence,1) end
+        end
         pauseReason=panel.Visible and "dashboard aberto" or diagFrame.Visible and "diagnostico aberto" or GuiService.MenuIsOpen and "menu Roblox aberto" or UIS:GetFocusedTextBox() and "teclado aberto" or currentState=="unknown" and "estado nao reconhecido" or "nenhuma"
         if previousState~=currentState then
+            if currentState=="underwater" and now-lastDiveRequest<8 then log("mergulho: transicao observada apos tentativa; origem nao confirmada") end
             log("estado: "..currentState); previousState=currentState
             local tags={}
             for k,v in pairs(c.evidence or {}) do table.insert(tags,k.."="..v) end
@@ -573,8 +616,8 @@ task.spawn(function()
         elseif currentState=="reel" then
             status.Text="Recolhimento experimental"
             lockedTarget=nil
-            if options.reel and now-lastReel>=interval and c.reel and visible(c.reel) then
-                lastReel=now; tap(center(c.reel))
+            if options.reel then
+                status.Text="Minigame: tempo do indicador ainda nao calibrado"
             end
         elseif currentState=="surface" then
             status.Text="Superficie confirmada"
@@ -582,7 +625,8 @@ task.spawn(function()
             if options.feed and c.feed and visible(c.feed) and now-lastFeed>3 then
                 lastFeed=now; tap(center(c.feed)); log("feed: tentativa de botao visivel")
             elseif options.dive and c.dive and visible(c.dive) and now-lastDive>3 then
-                lastDive=now; tap(center(c.dive)); log("dive: tentativa de botao visivel")
+                lastDive=now; lastDiveRequest=now
+                local ok,msg=tap(center(c.dive)); log("dive: "..tostring(ok).." | "..tostring(msg))
             end
         elseif currentState=="underwater" then
             status.Text="Submerso"
@@ -612,7 +656,7 @@ task.spawn(function()
                         status.Text=ok and ("Disparo: "..lockedTarget.name) or msg
                     end
                     if not on and now-lastTarget>1.5 then lockedTarget=nil end
-                else status.Text="Nenhum alvo corresponde aos filtros" end
+                else status.Text=lastTargetReason end
             else lockedTarget=nil end
         else
             lockedTarget=nil
@@ -628,4 +672,4 @@ task.spawn(function()
         task.wait(0.08)
     end
 end)
-print("HarpoonMobile v0.7 carregado | PlaceId: "..tostring(game.PlaceId))
+print("HarpoonMobile v0.8 carregado | PlaceId: "..tostring(game.PlaceId))
