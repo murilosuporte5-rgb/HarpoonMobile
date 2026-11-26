@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harpoon — catálogo econômico</title>
+<style>
+*{box-sizing:border-box}body{font:15px system-ui,sans-serif;margin:0;background:#101827;color:#edf3fa}main{max-width:850px;margin:auto;padding:18px}h1{font-size:24px}p{color:#b9c7d9;line-height:1.5}form,.panel{background:#1c293a;padding:16px;border-radius:12px;margin:14px 0}label{display:block;margin:10px 0 4px}input,select,button{font:inherit;padding:10px;border:1px solid #52647c;border-radius:7px;background:#101827;color:#edf3fa;width:100%}button{background:#155da3;margin-top:10px;cursor:pointer}button.secondary{background:#293a50}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}.entry{border-top:1px solid #46566b;padding:12px 0}.entry button{width:auto;padding:6px 10px;background:#293a50}.rate{font-size:20px;font-weight:bold}small{color:#b9c7d9}#status{min-height:22px}
+</style>
+<main><h1>Harpoon — catálogo econômico</h1><p>Registre somente valores individuais exibidos pelo jogo. A renda total do aquário, recordes mundiais e valores de recompensa não são renda individual. O catálogo funciona localmente e não controla o jogo.</p>
+<form id="form"><div class="grid">
+<div><label for="species">Espécie</label><input id="species" required maxlength="100" placeholder="Nome exibido"></div>
+<div><label for="region">Região</label><select id="region"><option>Não informada</option><option>Naufrágio</option><option>Ruínas</option><option>Tóxico</option><option>Ossos</option><option>Lava</option><option>Vazio</option><option>Cósmico</option><option>Outra</option></select></div>
+<div><label for="rarity">Raridade</label><input id="rarity" maxlength="50" placeholder="Ex.: Comum"></div>
+<div><label for="mutation">Mutação</label><input id="mutation" maxlength="50"></div>
+<div><label for="stage">Estágio</label><select id="stage"><option>Não informado</option><option>Filhote</option><option>Jovem</option><option>Adulto</option><option>Outro</option></select></div>
+<div><label for="weight">Peso exibido (kg)</label><input id="weight" inputmode="decimal" placeholder="Ex.: 444"></div>
+<div><label for="rate">Rendimento individual</label><input id="rate" placeholder="Ex.: 1.5M" required></div>
+<div><label for="unit">Período</label><select id="unit"><option value="1">Por segundo</option><option value="60">Por minuto</option></select></div>
+<div><label for="basis">Tipo de renda</label><select id="basis"><option value="observed">Exemplar atual</option><option value="base">Base da espécie</option></select></div>
+<div><label for="evidence">Origem observada</label><input id="evidence" required maxlength="300" placeholder="Ex.: ficha individual no aquário"></div>
+</div><button>Salvar observação</button></form>
+<section class="panel"><h2>Ranking</h2><div class="grid"><input id="search" placeholder="Buscar espécie, região, mutação"><select id="kind"><option value="observed">Exemplares atuais</option><option value="base">Renda base</option></select></div><p id="status" role="status"></p><div id="rows"></div><button id="export" class="secondary">Exportar JSON</button><label for="import">Importar catálogo JSON</label><input type="file" accept=".json,application/json" id="import"></section>
+</main>
+<script>
+"use strict";
+const $=id=>document.getElementById(id), key="harpoon.catalog.v1";
+let rows=[];
+function number(raw){
+ const t=String(raw).trim().toUpperCase().replace(/^\$\s*/,"");
+ if(!t)return null;
+ const m=t.match(/^(\d+(?:[.,]\d+)?)\s*([KMBT]?)$/);
+ if(!m || (!m[2] && /[.,]\d{3}$/.test(m[1])))throw Error("Número ambíguo. Use 1000 ou 1.5K.");
+ const n=Number(m[1].replace(",","."))*({"":1,K:1e3,M:1e6,B:1e9,T:1e12}[m[2]]);
+ if(!Number.isFinite(n)||n<0)throw Error("Valor inválido.");
+ return n;
+}
+function clean(x,max){return typeof x==="string"?x.trim().slice(0,max):""}
+function validate(r){
+ if(!r||typeof r!=="object")throw Error("Registro inválido.");
+ const out={species:clean(r.species,100),region:clean(r.region,60),rarity:clean(r.rarity,50),mutation:clean(r.mutation,50),stage:clean(r.stage,40),basis:r.basis,rate:r.rate,weight:r.weight??null,evidence:clean(r.evidence,300),date:clean(r.date,40)};
+ if(!out.species||!out.evidence||!["observed","base"].includes(out.basis)||!Number.isFinite(out.rate)||out.rate<0||out.rate>1e18||(out.weight!==null&&(!Number.isFinite(out.weight)||out.weight<0)))throw Error("Campos inválidos.");
+ return out;
+}
+function persist(){try{localStorage.setItem(key,JSON.stringify(rows));return true}catch(e){$("status").textContent="Armazenamento indisponível: exporte o JSON.";return false}}
+function fmt(n){return new Intl.NumberFormat("pt-BR",{maximumFractionDigits:2}).format(n)}
+function render(){
+ const q=$("search").value.trim().toLowerCase(), basis=$("kind").value;
+ const filtered=rows.map((r,i)=>({r,i})).filter(({r})=>r.basis===basis&&[r.species,r.region,r.rarity,r.mutation,r.stage].join(" ").toLowerCase().includes(q)).sort((a,b)=>b.r.rate-a.r.rate);
+ $("rows").replaceChildren();$("status").textContent=filtered.length+" observações nesta categoria. "+rows.length+" no catálogo.";
+ for(const {r,i} of filtered){
+   const el=document.createElement("article");el.className="entry";
+   const name=document.createElement("strong");name.textContent=r.species+" · "+r.region;
+   const rate=document.createElement("div");rate.className="rate";rate.textContent="$"+fmt(r.rate)+"/s";
+   const details=document.createElement("p");details.textContent=[r.rarity,r.mutation,r.stage,r.weight===null?"":fmt(r.weight)+" kg"].filter(Boolean).join(" · ");
+   const source=document.createElement("small");source.textContent="Fonte manual: "+r.evidence;
+   const remove=document.createElement("button");remove.type="button";remove.textContent="Remover";remove.onclick=()=>{if(confirm("Remover esta observação?")){rows.splice(i,1);render();persist()}};
+   el.append(name,rate,details,source,document.createElement("br"),remove);$("rows").append(el);
+ }
+}
+try{const saved=JSON.parse(localStorage.getItem(key)||"[]");if(Array.isArray(saved))rows=saved.map(validate)}catch(e){rows=[]}
+$("form").onsubmit=e=>{e.preventDefault();try{
+ const raw=number($("rate").value);if(raw===null)throw Error("Informe o rendimento.");
+ const r=validate({species:$("species").value,region:$("region").value,rarity:$("rarity").value,mutation:$("mutation").value,stage:$("stage").value,weight:number($("weight").value),rate:raw/Number($("unit").value),basis:$("basis").value,evidence:$("evidence").value,date:new Date().toISOString()});
+ if(rows.length>=10000)throw Error("Exporte e arquive antes de acrescentar novos registros.");
+ rows.push(r);$("kind").value=r.basis;render();persist();$("form").reset();
+ }catch(err){$("status").textContent=err.message}};
+$("search").oninput=render;$("kind").onchange=render;
+$("export").onclick=()=>{const blob=new Blob([JSON.stringify({schema:1,records:rows},null,2)],{type:"application/json"});const u=URL.createObjectURL(blob);const a=document.createElement("a");a.href=u;a.download="harpoon-catalog.json";a.click();setTimeout(()=>URL.revokeObjectURL(u),1000)};
+$("import").onchange=async e=>{try{const f=e.target.files[0];if(!f)return;if(f.size>5000000)throw Error("Arquivo muito grande.");const data=JSON.parse(await f.text());if(data.schema!==1||!Array.isArray(data.records)||rows.length+data.records.length>10000)throw Error("Formato ou quantidade inválida.");const next=data.records.map(validate);rows.push(...next);render();persist()}catch(err){$("status").textContent=err.message}finally{e.target.value=""}};
+render();
+</script></html>
