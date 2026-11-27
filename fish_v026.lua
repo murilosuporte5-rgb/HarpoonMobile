@@ -523,7 +523,13 @@ local function normalTap(p,hold)
         if not released then released=pcall(input,false) end
         busy=false
         releaseActive=nil
-        if not released then farmOn=false; cycleOn=false; movement=1; aimOn=false end
+        if not released then
+            farmOn=false; cycleOn=false; movement=1; aimOn=false
+            if alive then
+                farmToggle.Text="Auto pesca: OFF"; aimToggle.Text="Auto mira: OFF"
+                cycleToggle.Text="Auto mergulho/retorno: OFF"; moveToggle.Text="Movimento: Manual"
+            end
+        end
     end
     releaseActive=release
     task.delay(hold or 0.045,release)
@@ -701,7 +707,8 @@ task.spawn(function()
                 end
                 if not c.underwater or fullLatch then return end
                 if movement~=1 and now-lastMovement>=0.8 then
-                    local b=movement==2 and c.up or c.down
+                    local b
+                    if movement==2 then b=c.up else b=c.down end
                     lastMovement=now
                     if b and visible(b) then
                         local sent,msg=normalTap(pointFor(b),0.25)
