@@ -507,6 +507,33 @@ local function associatedRarity(obj)
     if communityOn and communityRarity[key] then return communityRarity[key],"community estimate" end
     return nil,"unknown"
 end
+-- A rate label must belong to this model and explicitly say income per second.
+-- Never associate global aquarium totals or unrelated interface cards.
+local function associatedIncome(obj)
+    local direct=finiteNumber(observedField(obj,fieldNames.income))
+    if direct~=nil then return direct,"attribute" end
+    local found=nil
+    for _,o in ipairs(obj:GetDescendants()) do
+        if o:IsA("TextLabel") and labelVisibleInModel(o,obj) then
+            local owner=o:FindFirstAncestorWhichIsA("BillboardGui")
+            if owner and owner:IsDescendantOf(obj) and (not owner.Adornee or owner.Adornee==obj or owner.Adornee:IsDescendantOf(obj)) then
+                local t=normalize(o.Text)
+                local body=t:match("^income%s*:%s*(.-)%s*/%s*sec$") or t:match("^income%s*:%s*(.-)%s*/%s*s$")
+                    or t:match("^renda%s*:%s*(.-)%s*/%s*s$") or t:match("^renda%s*:%s*(.-)%s*/%s*seg$")
+                if body then
+                    local clean=body:gsub("^%s*%$%s*","")
+                    local n,ok=numberInput(clean)
+                    if ok and n~=nil then
+                        if found~=nil and found~=n then return nil,"conflict" end
+                        found=n
+                    end
+                end
+            end
+        end
+    end
+    if found~=nil then return found,"billboard" end
+    return nil,"unknown"
+end
 local fishNames={"fish","shark","kraken","megalodon","crocodon","nightcrawler","hexjaw","shrimp","hydra","ray","peixe","tubarao"}
 local models={}
 local function modelAdd(o)
@@ -538,7 +565,7 @@ local function chooseFish(blockedUp,blockedDown)
             if w~=nil then
                 recognized=recognized+1
                 local rarity,raritySource=associatedRarity(o)
-                local income=finiteNumber(observedField(o,fieldNames.income))
+                local income,incomeSource=associatedIncome(o)
                 if rarity then knownRarity=knownRarity+1; raritySources[raritySource]=raritySources[raritySource]+1 end
                 if income~=nil then knownIncome=knownIncome+1 end
                 local name=speciesKey(o.Name)
@@ -574,7 +601,7 @@ local function chooseFish(blockedUp,blockedDown)
                             else better=d<best.distance end
                         end
                         if better then
-                            best={object=o,name=o.Name,weight=w,rarity=rarity,raritySource=raritySource,income=income,inView=inView,dy=dy,direction=direction,distance=d}
+                            best={object=o,name=o.Name,weight=w,rarity=rarity,raritySource=raritySource,income=income,incomeSource=incomeSource,inView=inView,dy=dy,direction=direction,distance=d}
                             score=rank
                         end
                     end
@@ -851,11 +878,12 @@ task.spawn(function()
                 if c.surface then fullLatch=false; resetVertical() end
                 if c.full then fullLatch=true end
                 local reelVisible=valid(cache) or scan()~=nil
+                if reelVisible then verticalProbe=nil; return end
                 observeVertical(now)
                 local target,n,r,i,m,v,sources=chooseFish(now<blockedUntil.up,now<blockedUntil.down)
                 targetModel=target
                 if auditPanel.Visible then
-                    farmInfo.Text=string.format("Modelos %d | Raridade %d | Renda %d\nRaridade: direta %d | manual %d | estimada %d\nCompativeis %d | Tela %d | Toques %d\nAlvo: %s\n%s",n,r,i,sources.attribute+sources.billboard,sources["manual observation"],sources["community estimate"],m,v,shots,target and (target.name.." / "..target.raritySource) or "-",farmMessage)
+                    farmInfo.Text=string.format("Modelos %d | Raridade %d | Renda %d\nRaridade: direta %d | manual %d | estimada %d\nCompativeis %d | Tela %d | Toques %d\nAlvo: %s\n%s",n,r,i,sources.attribute+sources.billboard,sources["manual observation"],sources["community estimate"],m,v,shots,target and (target.name.." / "..target.raritySource.." / renda: "..target.incomeSource) or "-",farmMessage)
                     return
                 end
                 if paused() or reelVisible then verticalProbe=nil; return end
